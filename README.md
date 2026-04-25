@@ -100,6 +100,39 @@ Required:
   -TargetExtensions .avi,.mp4
 ```
 
+## Optional UI
+
+This project includes a small Windows UI script with:
+
+- Source folder input
+- Target folder input
+- Optional CSV output input
+- Compare button
+- On-screen output panel
+
+Run it with:
+
+```powershell
+.\vidmatch-ui.ps1
+```
+
+Or launch from Windows Explorer/shortcut with:
+
+```text
+launch-vidmatch-ui.bat
+```
+
+Launch with no visible console window:
+
+```text
+launch-vidmatch-ui.vbs
+```
+
+Notes:
+
+- The UI launches `vidmatch.ps1` in the background.
+- If `options.json` exists, the UI pre-fills source/target/csv from that file.
+
 ## Options File Example
 
 `options.json.example`:
