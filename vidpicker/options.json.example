@@ -1,0 +1,5 @@
+{
+  "SourceDir": "M:/p/done",
+  "DestDir": "M:/p/handbrake",
+  "Extensions": [".avi", ".mp4"]
+}

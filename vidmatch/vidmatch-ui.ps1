@@ -1,7 +1,35 @@
 param(
     [Parameter(Mandatory = $false)]
-    [string]$ScriptPath = (Join-Path $PSScriptRoot "vidmatch.ps1")
+    [string]$ScriptPath
 )
+
+$scriptRoot = $PSScriptRoot
+if ([string]::IsNullOrWhiteSpace($scriptRoot)) {
+    $scriptRoot = Split-Path -Parent $PSCommandPath
+}
+if ([string]::IsNullOrWhiteSpace($scriptRoot)) {
+    $scriptRoot = (Get-Location).Path
+}
+
+if ([string]::IsNullOrWhiteSpace($ScriptPath)) {
+    $ScriptPath = Join-Path $scriptRoot "vidmatch.ps1"
+}
+
+$currentApartment = [System.Threading.Thread]::CurrentThread.GetApartmentState()
+if ($currentApartment -ne [System.Threading.ApartmentState]::STA) {
+    $powershellExe = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
+    if (-not (Test-Path -LiteralPath $powershellExe -PathType Leaf)) {
+        $powershellExe = "powershell.exe"
+    }
+
+    Start-Process -FilePath $powershellExe -ArgumentList @(
+        "-NoProfile",
+        "-ExecutionPolicy", "Bypass",
+        "-STA",
+        "-File", "`"$PSCommandPath`""
+    ) | Out-Null
+    exit 0
+}
 
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
@@ -52,7 +80,7 @@ if (-not (Test-Path -LiteralPath $ScriptPath -PathType Leaf)) {
 }
 
 $scriptPathResolved = (Resolve-Path -LiteralPath $ScriptPath).Path
-$optionsPath = Join-Path $PSScriptRoot "options.json"
+$optionsPath = Join-Path $scriptRoot "options.json"
 $defaults = Load-OptionsDefaults -OptionsPath $optionsPath
 
 $form = New-Object System.Windows.Forms.Form
@@ -244,21 +272,22 @@ $runButton.Add_Click({
         $stderr = $process.StandardError.ReadToEnd()
         $process.WaitForExit()
 
-        $combined = @()
+        $nl = [Environment]::NewLine
+
+        $combined = ""
         if (-not [string]::IsNullOrWhiteSpace($stdout)) {
-            $combined += $stdout.TrimEnd()
+            $combined += $stdout.TrimEnd() -replace "\r?\n", $nl
         }
         if (-not [string]::IsNullOrWhiteSpace($stderr)) {
-            $combined += ""
-            $combined += "Errors:"
-            $combined += $stderr.TrimEnd()
+            $combined += $nl + $nl + "Errors:" + $nl
+            $combined += $stderr.TrimEnd() -replace "\r?\n", $nl
         }
 
-        if ($combined.Count -eq 0) {
+        if ([string]::IsNullOrWhiteSpace($combined)) {
             $outputText.Text = "Done. No output returned."
         }
         else {
-            $outputText.Text = ($combined -join [Environment]::NewLine)
+            $outputText.Text = $combined
         }
 
         if ($process.ExitCode -eq 0) {

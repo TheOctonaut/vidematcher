@@ -122,11 +122,18 @@ Or launch from Windows Explorer/shortcut with:
 launch-vidmatch-ui.bat
 ```
 
-Launch with no visible console window:
+For a no-console launch, first generate a Windows shortcut by running once:
 
-```text
-launch-vidmatch-ui.vbs
+```powershell
+.\create-shortcut.ps1
 ```
+
+This creates `vidmatch.lnk` in the project folder. Double-click it to launch the UI with no console window.
+
+Tip:
+
+- `vidmatch.lnk` is gitignored — each user runs `create-shortcut.ps1` once after cloning.
+- VBScript (`.vbs`) is disabled by default on Windows 11 24H2+, which is why no `.vbs` launcher is provided.
 
 Notes:
 

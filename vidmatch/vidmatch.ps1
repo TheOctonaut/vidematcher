@@ -6,7 +6,7 @@ param(
     [string]$TargetDir,
 
     [Parameter(Mandatory = $false)]
-    [string]$OptionsFile = (Join-Path $PSScriptRoot "options.json"),
+    [string]$OptionsFile,
 
     [Parameter(Mandatory = $false)]
     [switch]$NoRecurse,
@@ -25,6 +25,18 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+
+$scriptRoot = $PSScriptRoot
+if ([string]::IsNullOrWhiteSpace($scriptRoot)) {
+    $scriptRoot = Split-Path -Parent $PSCommandPath
+}
+if ([string]::IsNullOrWhiteSpace($scriptRoot)) {
+    $scriptRoot = (Get-Location).Path
+}
+
+if ([string]::IsNullOrWhiteSpace($OptionsFile)) {
+    $OptionsFile = Join-Path $scriptRoot "options.json"
+}
 
 $exampleOptionsFileName = "options.json.example"
 
@@ -133,7 +145,7 @@ $defaults = [PSCustomObject]@{
     TargetExtensions = @(".avi", ".mp4")
 }
 
-$exampleOptionsFile = Join-Path $PSScriptRoot $exampleOptionsFileName
+$exampleOptionsFile = Join-Path $scriptRoot $exampleOptionsFileName
 
 if (-not (Test-Path -LiteralPath $OptionsFile -PathType Leaf)) {
     Write-Host "Options file not found: $OptionsFile"
