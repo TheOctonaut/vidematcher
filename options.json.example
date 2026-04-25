@@ -1,0 +1,9 @@
+{
+  "SourceDir": "C:/path/to/source",
+  "TargetDir": "C:/path/to/target",
+  "Recurse": true,
+  "ShowRelativePaths": false,
+  "CsvOutputPath": null,
+  "SourceExtensions": [".avi", ".mp4"],
+  "TargetExtensions": [".avi", ".mp4"]
+}
