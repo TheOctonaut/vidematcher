@@ -100,7 +100,11 @@ function ConvertTo-NormalizedExtensionArray {
 }
 
 function Get-NormalizedBaseName {
-    param([Parameter(Mandatory = $true)][string]$Name)
+    param([string]$Name)
+
+    if ([string]::IsNullOrWhiteSpace($Name)) {
+        return $null
+    }
 
     return $Name.Trim().ToLowerInvariant()
 }
@@ -273,7 +277,10 @@ Write-Host "Scanning destination folder: $destRoot"
 $destBaseNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
 $destFiles = Get-ChildItem -LiteralPath $destRoot -File -Recurse -ErrorAction SilentlyContinue
 foreach ($file in $destFiles) {
-    [void]$destBaseNames.Add((Get-NormalizedBaseName -Name $file.BaseName))
+    $normalized = Get-NormalizedBaseName -Name $file.BaseName
+    if ($null -ne $normalized) {
+        [void]$destBaseNames.Add($normalized)
+    }
 }
 
 $extensionSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
@@ -328,6 +335,12 @@ $plannedOutputNames = [System.Collections.Generic.HashSet[string]]::new([System.
 
 foreach ($file in $candidateFiles) {
     $normalizedBase = Get-NormalizedBaseName -Name $file.BaseName
+    if ($null -eq $normalizedBase) {
+        Write-Warning "Skipping file with empty basename: $($file.FullName)"
+        $candidateWarnings++
+        continue
+    }
+
     if ($destBaseNames.Contains($normalizedBase)) {
         $skippedExisting++
         continue

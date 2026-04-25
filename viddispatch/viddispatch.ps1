@@ -437,6 +437,27 @@ $dispatchMoved = 0
 $dispatchMoveFailed = 0
 
 # ---------------------------------------------------------------------------
+# PREFLIGHT: validate encode dependencies before any destructive steps
+# ---------------------------------------------------------------------------
+
+$preflightArgs = @(
+    "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+    (Escape-Argument -Value $resolvedVidencodeScript),
+    "-SourceDir", (Escape-Argument -Value $resolvedHandbrakeDir),
+    "-DestDir",   (Escape-Argument -Value $resolvedFinalDir),
+    "-InputFiles", (Escape-Argument -Value "__viddispatch_preflight__.avi"),
+    "-DryRun",
+    "-NoConfirm"
+)
+
+$preflightResult = Invoke-ToolScript -Label "preflight: videncode" -Exe $psExe -Arguments $preflightArgs
+if ($preflightResult.ExitCode -ne 0) {
+    Write-Warning "Preflight failed (videncode dependencies/config). Stopping before file moves."
+    Write-Host "SUMMARY|tool=viddispatch|status=failed|dry_run=$dryRunFlag|skip_pick=$skipPickFlag|note=preflight_videncode_failed"
+    exit 1
+}
+
+# ---------------------------------------------------------------------------
 # STEP 1: vidpicker (staging -> handbrake folder)
 # ---------------------------------------------------------------------------
 

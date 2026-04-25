@@ -7,6 +7,9 @@ Runs the full video processing pipeline in sequence:
 3. **videncode** — encode the unmatched files via HandBrakeCLI and move outputs to the final folder
 4. **reconcile cleanup** — compare handbrake leftovers to final files by basename and enforce size rules
 
+Before step 1, dispatcher runs a **videncode preflight check** (dry-run, no changes) to validate
+HandBrakeCLI/preset configuration. If preflight fails, dispatcher exits before moving or deleting files.
+
 ## Requirements
 
 - Windows PowerShell 5.1+ or PowerShell 7+
@@ -151,6 +154,7 @@ Each tool reads its own `options.json` for encoding settings (preset, extensions
 - vidpicker will prompt for confirmation before moving/deleting files unless `-NoConfirm` is set.
 - videncode will prompt for confirmation before encoding unless `-NoConfirm` is set.
 - `-DryRun` propagates to both: no files are moved or encoded.
+- A videncode preflight check runs first to ensure encode dependencies are available before destructive steps.
 - If any step fails (non-zero exit), the pipeline stops immediately.
 
 ## SUMMARY Output

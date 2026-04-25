@@ -137,6 +137,34 @@ function New-ExtensionSet {
     return $set
 }
 
+function Get-RelativePath {
+    param(
+        [Parameter(Mandatory = $true)][string]$BasePath,
+        [Parameter(Mandatory = $true)][string]$TargetPath
+    )
+
+    try {
+        $baseFull = [System.IO.Path]::GetFullPath($BasePath)
+        $targetFull = [System.IO.Path]::GetFullPath($TargetPath)
+
+        if ([System.IO.Path]::GetPathRoot($baseFull) -ne [System.IO.Path]::GetPathRoot($targetFull)) {
+            return $targetFull
+        }
+
+        if (-not $baseFull.EndsWith("\\") -and -not $baseFull.EndsWith("/")) {
+            $baseFull += "\\"
+        }
+
+        $baseUri = New-Object System.Uri($baseFull)
+        $targetUri = New-Object System.Uri($targetFull)
+        $relativeUri = $baseUri.MakeRelativeUri($targetUri)
+        return [System.Uri]::UnescapeDataString($relativeUri.ToString()).Replace('/', '\\')
+    }
+    catch {
+        return $TargetPath
+    }
+}
+
 $defaults = [PSCustomObject]@{
     Recurse = $true
     ShowRelativePaths = $false
@@ -292,7 +320,7 @@ $unmatched = foreach ($file in $sourceFiles) {
         if ($resolvedShowRelativePaths) {
             [PSCustomObject]@{
                 BaseName = $file.BaseName
-                FilePath = [System.IO.Path]::GetRelativePath($sourceRoot, $file.FullName)
+                FilePath = Get-RelativePath -BasePath $sourceRoot -TargetPath $file.FullName
             }
         }
         else {

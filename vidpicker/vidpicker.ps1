@@ -83,6 +83,34 @@ function ConvertTo-NormalizedExtensionArray {
     return @($result | Select-Object -Unique)
 }
 
+function Get-RelativePath {
+    param(
+        [Parameter(Mandatory = $true)][string]$BasePath,
+        [Parameter(Mandatory = $true)][string]$TargetPath
+    )
+
+    try {
+        $baseFull = [System.IO.Path]::GetFullPath($BasePath)
+        $targetFull = [System.IO.Path]::GetFullPath($TargetPath)
+
+        if ([System.IO.Path]::GetPathRoot($baseFull) -ne [System.IO.Path]::GetPathRoot($targetFull)) {
+            return $targetFull
+        }
+
+        if (-not $baseFull.EndsWith("\\") -and -not $baseFull.EndsWith("/")) {
+            $baseFull += "\\"
+        }
+
+        $baseUri = New-Object System.Uri($baseFull)
+        $targetUri = New-Object System.Uri($targetFull)
+        $relativeUri = $baseUri.MakeRelativeUri($targetUri)
+        return [System.Uri]::UnescapeDataString($relativeUri.ToString()).Replace('/', '\\')
+    }
+    catch {
+        return $TargetPath
+    }
+}
+
 # ---------------------------------------------------------------------------
 # Defaults
 # ---------------------------------------------------------------------------
@@ -252,7 +280,7 @@ else {
 }
 
 foreach ($file in $toMove) {
-    $rel = [System.IO.Path]::GetRelativePath($sourceRoot, $file.FullName)
+    $rel = Get-RelativePath -BasePath $sourceRoot -TargetPath $file.FullName
     Write-Host "  $rel  ->  $destRoot\$($file.Name)"
 }
 
@@ -260,7 +288,7 @@ if ($skipped.Count -gt 0) {
     Write-Host ""
     Write-Host "Skipped (name conflict in destination):"
     foreach ($file in $skipped) {
-        $rel = [System.IO.Path]::GetRelativePath($sourceRoot, $file.FullName)
+        $rel = Get-RelativePath -BasePath $sourceRoot -TargetPath $file.FullName
         Write-Host "  $rel"
     }
 }
@@ -283,7 +311,7 @@ if ($foldersToClean.Count -gt 0) {
         Write-Host "Source folder(s) to delete (after moving files):"
     }
     foreach ($folder in $foldersToClean) {
-        $rel = [System.IO.Path]::GetRelativePath($sourceRoot, $folder)
+        $rel = Get-RelativePath -BasePath $sourceRoot -TargetPath $folder
         Write-Host "  $rel"
     }
 }
@@ -354,12 +382,12 @@ if ($foldersToClean.Count -gt 0) {
         }
         try {
             Remove-Item -LiteralPath $folder -Recurse -Force
-            $rel = [System.IO.Path]::GetRelativePath($sourceRoot, $folder)
+            $rel = Get-RelativePath -BasePath $sourceRoot -TargetPath $folder
             Write-Host "  Deleted: $rel"
             $deletedFolders++
         }
         catch {
-            $rel = [System.IO.Path]::GetRelativePath($sourceRoot, $folder)
+            $rel = Get-RelativePath -BasePath $sourceRoot -TargetPath $folder
             Write-Warning "  Failed to delete '$rel': $($_.Exception.Message)"
         }
     }
@@ -385,12 +413,12 @@ if ($foldersToClean.Count -gt 0) {
         if ($children.Count -eq 0) {
             try {
                 Remove-Item -LiteralPath $ancestor -Force
-                $rel = [System.IO.Path]::GetRelativePath($sourceRoot, $ancestor)
+                $rel = Get-RelativePath -BasePath $sourceRoot -TargetPath $ancestor
                 Write-Host "  Deleted empty: $rel"
                 $deletedEmptyAncestors++
             }
             catch {
-                $rel = [System.IO.Path]::GetRelativePath($sourceRoot, $ancestor)
+                $rel = Get-RelativePath -BasePath $sourceRoot -TargetPath $ancestor
                 Write-Warning "  Failed to delete '$rel': $($_.Exception.Message)"
             }
         }
