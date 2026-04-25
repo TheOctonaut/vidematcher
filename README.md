@@ -31,18 +31,48 @@ Use this to harvest finished files out of a staging area and into a processing q
 
 ---
 
+### [videncode](videncode/)
+
+Encodes video files using HandBrakeCLI with a named preset, skips files already present in the destination (by basename), and moves outputs to the destination on success.
+
+Use this to batch-encode a staging folder without re-processing already-completed files.
+
+- Custom preset support (built-in or imported from a JSON preset file)
+- Accepts an explicit file list or scans a folder automatically
+- Dry run mode; outputs staged to a temp folder before final move
+
+→ See [videncode/README.md](videncode/README.md)
+
+---
+
+### [viddispatch](viddispatch/)
+
+Runs the full pipeline in one command: picks files from staging, checks which ones haven't been encoded yet, and encodes them.
+
+- Propagates `-DryRun` and `-NoConfirm` to all tools
+- `-SkipPick` to skip straight to match+encode if files are already in the handbrake folder
+- Stops immediately if any step fails
+
+→ See [viddispatch/README.md](viddispatch/README.md)
+
+---
+
 ## Workflow
 
-```
+```text
 [Source staging area]
         |
-    vidpicker        (move .avi/.mp4 files → handbrake folder, clean up source)
+    vidpicker        (move .avi/.mp4 files to handbrake folder, clean up source)
         |
-[Handbrake folder]
+[Handbrake folder] <----+
+        |               |
+    vidmatch            |  (compare handbrake folder against final folder;
+        |               |   list files not yet encoded)
+[Unmatched list] -------+
         |
-    vidmatch         (check processed files exist in target / archive)
+    videncode        (encode unmatched files via HandBrakeCLI, move output to final folder)
         |
-[Target / archive]
+[Final folder]
 ```
 
 ## Requirements
@@ -59,7 +89,7 @@ Copy `options.json.example` to `options.json` and set your paths, or let the scr
 Each tool ships with:
 
 | File | Purpose |
-|---|---|
+| --- | --- |
 | `launch-<tool>-ui.bat` | Double-click in Explorer to open the UI (brief console window) |
 | `create-shortcut.ps1` | Run once to create a `.lnk` that opens the UI with no console window |
 

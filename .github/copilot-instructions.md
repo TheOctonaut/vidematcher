@@ -8,6 +8,8 @@ Use these instructions for all future changes in this repository.
 - Current tools:
   - `vidmatch/`: compare source vs target by basename (ignore extension).
   - `vidpicker/`: pick/move matching video files and clean source folders.
+  - `videncode/`: encode files via HandBrakeCLI with a preset; skip already-processed; move output to destination.
+  - `viddispatch/`: run the full pipeline (pick -> match -> encode -> reconcile cleanup) in one command.
 - Keep behavior conservative and explicit, especially for destructive operations.
 
 ## Folder and File Conventions

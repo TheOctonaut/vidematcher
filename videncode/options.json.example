@@ -1,0 +1,9 @@
+{
+  "SourceDir": "C:/path/to/handbrake-input",
+  "DestDir": "C:/path/to/final-destination",
+  "PresetName": "My Custom Preset",
+  "PresetImportFile": "C:/path/to/custom-presets.json",
+  "HandBrakeCliPath": "HandBrakeCLI",
+  "OutputExtension": ".mp4",
+  "SourceExtensions": [".avi", ".mp4", ".mkv"]
+}
