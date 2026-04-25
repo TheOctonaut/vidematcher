@@ -88,8 +88,6 @@ function ConvertTo-NormalizedExtensionArray {
 # ---------------------------------------------------------------------------
 
 $defaults = [PSCustomObject]@{
-    SourceDir  = "C:/path/to/source"
-    DestDir    = "C:/path/to/dest"
     Extensions = @(".avi", ".mp4")
 }
 
@@ -108,8 +106,8 @@ if (-not (Test-Path -LiteralPath $OptionsFile -PathType Leaf)) {
         }
         else {
             $defaultOptions = [ordered]@{
-                SourceDir  = $defaults.SourceDir
-                DestDir    = $defaults.DestDir
+                SourceDir  = "C:/path/to/source"
+                DestDir    = "C:/path/to/dest"
                 Extensions = $defaults.Extensions
             }
             $defaultOptions | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $OptionsFile -Encoding UTF8
