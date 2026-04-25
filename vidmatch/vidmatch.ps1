@@ -283,6 +283,9 @@ $sourceExtensionSet = New-ExtensionSet $resolvedSourceExtensions
 $sourceFiles = Get-ChildItem -LiteralPath $sourceRoot -File -Recurse:$recurse |
     Where-Object { $sourceExtensionSet.Contains(($_.Extension).ToLowerInvariant()) }
 
+$targetCount = ($targetFiles | Measure-Object).Count
+$sourceCount = ($sourceFiles | Measure-Object).Count
+
 $unmatched = foreach ($file in $sourceFiles) {
     $baseName = Get-NormalizedBaseName -Name $file.BaseName
     if (-not $targetBaseNames.Contains($baseName)) {
@@ -302,6 +305,7 @@ $unmatched = foreach ($file in $sourceFiles) {
 }
 
 $sortedUnmatched = $unmatched | Sort-Object BaseName, FilePath
+$unmatchedCount = ($sortedUnmatched | Measure-Object).Count
 
 if ($null -ne $resolvedCsvOutputPath) {
     $csvDir = Split-Path -Parent $resolvedCsvOutputPath
@@ -315,6 +319,8 @@ if ($null -ne $resolvedCsvOutputPath) {
 
 if (-not $sortedUnmatched) {
     Write-Host "All source files have a filename match in target (ignoring extension)."
+    $csvWritten = if ($null -ne $resolvedCsvOutputPath) { "true" } else { "false" }
+    Write-Host ("SUMMARY|tool=vidmatch|status=noop|source_files={0}|target_files={1}|unmatched={2}|csv_written={3}" -f $sourceCount, $targetCount, $unmatchedCount, $csvWritten)
     exit 0
 }
 
@@ -324,3 +330,5 @@ $sortedUnmatched | Format-Table -AutoSize
 
 Write-Host ""
 Write-Host ("Total unmatched: {0}" -f ($sortedUnmatched | Measure-Object).Count)
+$csvWritten = if ($null -ne $resolvedCsvOutputPath) { "true" } else { "false" }
+Write-Host ("SUMMARY|tool=vidmatch|status=ok|source_files={0}|target_files={1}|unmatched={2}|csv_written={3}" -f $sourceCount, $targetCount, $unmatchedCount, $csvWritten)

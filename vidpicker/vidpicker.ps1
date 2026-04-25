@@ -207,9 +207,12 @@ Write-Host "Scanning: $sourceRoot"
 
 $matchedFiles = Get-ChildItem -LiteralPath $sourceRoot -File -Recurse |
     Where-Object { $extensionSet.Contains(($_.Extension).ToLowerInvariant()) }
+$matchedCount = ($matchedFiles | Measure-Object).Count
 
 if ($matchedFiles.Count -eq 0) {
     Write-Host "No matching files found."
+    $dryRunText = if ($DryRun) { "true" } else { "false" }
+    Write-Host ("SUMMARY|tool=vidpicker|status=noop|dry_run={0}|matched=0|planned_move=0|planned_delete_folders=0|moved=0|move_failed=0|skipped_conflicts=0|deleted_folders=0|deleted_empty_ancestors=0" -f $dryRunText)
     exit 0
 }
 
@@ -233,6 +236,9 @@ foreach ($file in $matchedFiles) {
         [void]$destConflicts.Add($file.Name)
     }
 }
+
+$plannedMoveCount = $toMove.Count
+$skippedCount = $skipped.Count
 
 # ---------------------------------------------------------------------------
 # Preview
@@ -266,6 +272,8 @@ $foldersToClean = $toMove |
     Where-Object { $_ -ne $sourceRoot } |
     Sort-Object { $_.Length } -Descending
 
+$plannedDeleteFolderCount = $foldersToClean.Count
+
 if ($foldersToClean.Count -gt 0) {
     Write-Host ""
     if ($DryRun) {
@@ -283,12 +291,14 @@ if ($foldersToClean.Count -gt 0) {
 if ($DryRun) {
     Write-Host ""
     Write-Host "Dry run complete. No files were moved or deleted."
+    Write-Host ("SUMMARY|tool=vidpicker|status=noop|dry_run=true|matched={0}|planned_move={1}|planned_delete_folders={2}|moved=0|move_failed=0|skipped_conflicts={3}|deleted_folders=0|deleted_empty_ancestors=0" -f $matchedCount, $plannedMoveCount, $plannedDeleteFolderCount, $skippedCount)
     exit 0
 }
 
 if ($toMove.Count -eq 0) {
     Write-Host ""
     Write-Host "Nothing to move."
+    Write-Host ("SUMMARY|tool=vidpicker|status=noop|dry_run=false|matched={0}|planned_move={1}|planned_delete_folders={2}|moved=0|move_failed=0|skipped_conflicts={3}|deleted_folders=0|deleted_empty_ancestors=0" -f $matchedCount, $plannedMoveCount, $plannedDeleteFolderCount, $skippedCount)
     exit 0
 }
 
@@ -301,6 +311,7 @@ if (-not $NoConfirm) {
     $confirm = Read-Host "Proceed? (Y/N)"
     if ($confirm -notmatch '^[Yy]') {
         Write-Host "Aborted."
+        Write-Host ("SUMMARY|tool=vidpicker|status=aborted|dry_run=false|matched={0}|planned_move={1}|planned_delete_folders={2}|moved=0|move_failed=0|skipped_conflicts={3}|deleted_folders=0|deleted_empty_ancestors=0" -f $matchedCount, $plannedMoveCount, $plannedDeleteFolderCount, $skippedCount)
         exit 0
     }
 }
@@ -326,6 +337,9 @@ foreach ($file in $toMove) {
 
 Write-Host "Moved: $moveOk  Failed: $moveError"
 
+$deletedFolders = 0
+$deletedEmptyAncestors = 0
+
 # ---------------------------------------------------------------------------
 # Clean up source folders (deepest first)
 # ---------------------------------------------------------------------------
@@ -342,6 +356,7 @@ if ($foldersToClean.Count -gt 0) {
             Remove-Item -LiteralPath $folder -Recurse -Force
             $rel = [System.IO.Path]::GetRelativePath($sourceRoot, $folder)
             Write-Host "  Deleted: $rel"
+            $deletedFolders++
         }
         catch {
             $rel = [System.IO.Path]::GetRelativePath($sourceRoot, $folder)
@@ -372,6 +387,7 @@ if ($foldersToClean.Count -gt 0) {
                 Remove-Item -LiteralPath $ancestor -Force
                 $rel = [System.IO.Path]::GetRelativePath($sourceRoot, $ancestor)
                 Write-Host "  Deleted empty: $rel"
+                $deletedEmptyAncestors++
             }
             catch {
                 $rel = [System.IO.Path]::GetRelativePath($sourceRoot, $ancestor)
@@ -383,3 +399,4 @@ if ($foldersToClean.Count -gt 0) {
 
 Write-Host ""
 Write-Host "Done."
+Write-Host ("SUMMARY|tool=vidpicker|status=ok|dry_run=false|matched={0}|planned_move={1}|moved={2}|move_failed={3}|skipped_conflicts={4}|planned_delete_folders={5}|deleted_folders={6}|deleted_empty_ancestors={7}" -f $matchedCount, $plannedMoveCount, $moveOk, $moveError, $skippedCount, $plannedDeleteFolderCount, $deletedFolders, $deletedEmptyAncestors)
