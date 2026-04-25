@@ -432,25 +432,36 @@ foreach ($file in $selected) {
     Write-Host ""
     Write-Host "Encoding: $($file.FullName)"
 
-    $psi = New-Object System.Diagnostics.ProcessStartInfo
-    $psi.FileName = $resolvedHandBrakeCliPath
-    $psi.Arguments = ($argList | ForEach-Object { Escape-Argument -Value $_ }) -join " "
-    $psi.UseShellExecute = $false
-    $psi.RedirectStandardOutput = $true
-    $psi.RedirectStandardError = $true
-    $psi.CreateNoWindow = $true
+    $argLine = ($argList | ForEach-Object { Escape-Argument -Value $_ }) -join " "
+    $stdoutPath = [System.IO.Path]::GetTempFileName()
+    $stderrPath = [System.IO.Path]::GetTempFileName()
+    $exitCode = 1
+    $stdout = ""
+    $stderr = ""
 
-    $proc = New-Object System.Diagnostics.Process
-    $proc.StartInfo = $psi
+    try {
+        $proc = Start-Process -FilePath $resolvedHandBrakeCliPath -ArgumentList $argLine -NoNewWindow -Wait -PassThru -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
+        $exitCode = $proc.ExitCode
 
-    [void]$proc.Start()
-    $stdout = $proc.StandardOutput.ReadToEnd()
-    $stderr = $proc.StandardError.ReadToEnd()
-    $proc.WaitForExit()
+        if (Test-Path -LiteralPath $stdoutPath -PathType Leaf) {
+            $stdout = Get-Content -LiteralPath $stdoutPath -Raw -ErrorAction SilentlyContinue
+        }
+        if (Test-Path -LiteralPath $stderrPath -PathType Leaf) {
+            $stderr = Get-Content -LiteralPath $stderrPath -Raw -ErrorAction SilentlyContinue
+        }
+    }
+    finally {
+        if (Test-Path -LiteralPath $stdoutPath -PathType Leaf) {
+            Remove-Item -LiteralPath $stdoutPath -Force -ErrorAction SilentlyContinue
+        }
+        if (Test-Path -LiteralPath $stderrPath -PathType Leaf) {
+            Remove-Item -LiteralPath $stderrPath -Force -ErrorAction SilentlyContinue
+        }
+    }
 
-    if ($proc.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $tempOutput -PathType Leaf)) {
+    if ($exitCode -ne 0 -or -not (Test-Path -LiteralPath $tempOutput -PathType Leaf)) {
         $encodeFailed++
-        Write-Warning "HandBrakeCLI failed for '$($file.FullName)' (ExitCode: $($proc.ExitCode))"
+        Write-Warning "HandBrakeCLI failed for '$($file.FullName)' (ExitCode: $exitCode)"
         if (-not [string]::IsNullOrWhiteSpace($stderr)) {
             Write-Warning ($stderr.TrimEnd() -replace "\r?\n", [Environment]::NewLine)
         }
