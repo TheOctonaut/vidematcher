@@ -54,7 +54,8 @@ Required:
 | `-SourceDir` | string | Folder to scan for input files |
 | `-DestDir` | string | Folder to receive encoded output files |
 | `-OptionsFile` | string | Path to options JSON file (default: `options.json` in script folder) |
-| `-InputFiles` | string[] | Explicit list of files to encode (absolute or relative to SourceDir). Overrides SourceDir scan. |
+| `-InputFiles` | string[] | Explicit list of files to encode (absolute or relative to SourceDir). Merges with `-InputFilesListFile` if both are provided. |
+| `-InputFilesListFile` | string | Path to a UTF-8 text file containing one input file path per line. Useful for large batches and paths with spaces. |
 | `-PresetName` | string | HandBrake preset name (case-sensitive) |
 | `-PresetImportFile` | string | Path to a custom preset JSON file to import |
 | `-HandBrakeCliPath` | string | Full path or command name for HandBrakeCLI |
@@ -89,19 +90,25 @@ Required:
 .\videncode.ps1 -PresetImportFile "C:/presets/custom.json" -PresetName "My Custom Preset"
 ```
 
-### 5) Preview without encoding
+### 5) Encode files from a list file
+
+```powershell
+.\videncode.ps1 -SourceDir "C:/path/to/source" -DestDir "C:/path/to/dest" -InputFilesListFile "C:/path/to/inputs.txt" -NoConfirm
+```
+
+### 6) Preview without encoding
 
 ```powershell
 .\videncode.ps1 -DryRun
 ```
 
-### 6) Run unattended
+### 7) Run unattended
 
 ```powershell
 .\videncode.ps1 -NoConfirm
 ```
 
-### 7) Full example
+### 8) Full example
 
 ```powershell
 .\videncode.ps1 `
@@ -144,3 +151,4 @@ Required:
 - Extension and basename matching are case-insensitive.
 - If two source files would produce the same output filename, the second one is skipped with a warning.
 - `PresetImportFile` is optional. If not set, the preset must be one of HandBrake's built-in presets.
+- `-InputFilesListFile` expects one path per line and is ideal when passing many files from another tool.

@@ -12,6 +12,9 @@ param(
     [string[]]$InputFiles,
 
     [Parameter(Mandatory = $false)]
+    [string]$InputFilesListFile,
+
+    [Parameter(Mandatory = $false)]
     [string]$PresetName,
 
     [Parameter(Mandatory = $false)]
@@ -286,8 +289,30 @@ foreach ($ext in $resolvedSourceExtensions) {
 $candidateFiles = New-Object System.Collections.Generic.List[System.IO.FileInfo]
 $candidateWarnings = 0
 
+$inputItems = New-Object System.Collections.Generic.List[string]
 if ($PSBoundParameters.ContainsKey("InputFiles") -and $null -ne $InputFiles -and $InputFiles.Count -gt 0) {
     foreach ($item in $InputFiles) {
+        if (-not [string]::IsNullOrWhiteSpace($item)) {
+            $inputItems.Add($item)
+        }
+    }
+}
+
+if ($PSBoundParameters.ContainsKey("InputFilesListFile") -and -not [string]::IsNullOrWhiteSpace($InputFilesListFile)) {
+    if (-not (Test-Path -LiteralPath $InputFilesListFile -PathType Leaf)) {
+        throw "InputFilesListFile does not exist: $InputFilesListFile"
+    }
+
+    $fileItems = Get-Content -LiteralPath $InputFilesListFile -ErrorAction Stop
+    foreach ($item in $fileItems) {
+        if (-not [string]::IsNullOrWhiteSpace($item)) {
+            $inputItems.Add($item)
+        }
+    }
+}
+
+if ($inputItems.Count -gt 0) {
+    foreach ($item in $inputItems) {
         if ([string]::IsNullOrWhiteSpace($item)) { continue }
 
         $fullPath = Resolve-InputFilePath -Item $item -SourceRoot $sourceRoot

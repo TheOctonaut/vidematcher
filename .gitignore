@@ -1,3 +1,4 @@
 *.csv
 *.lnk
 options.json
+viddispatch/logs/*.log

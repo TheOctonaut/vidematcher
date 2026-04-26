@@ -27,7 +27,13 @@ param(
     [switch]$DryRun,
 
     [Parameter(Mandatory = $false)]
-    [switch]$NoConfirm
+    [switch]$NoConfirm,
+
+    [Parameter(Mandatory = $false)]
+    [string]$DebugLogPath,
+
+    [Parameter(Mandatory = $false)]
+    [switch]$VerboseConsole
 )
 
 $ErrorActionPreference = "Stop"
@@ -49,6 +55,106 @@ $exampleOptionsFileName = "options.json.example"
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+$script:DispatchDebugLogPath = $null
+
+function Initialize-DebugLogPath {
+    param([string]$RequestedPath)
+
+    if (-not [string]::IsNullOrWhiteSpace($RequestedPath)) {
+        $resolvedParent = Split-Path -Parent $RequestedPath
+        if (-not [string]::IsNullOrWhiteSpace($resolvedParent)) {
+            New-Item -ItemType Directory -Force -Path $resolvedParent | Out-Null
+        }
+        return $RequestedPath
+    }
+
+    $logDir = Join-Path $scriptRoot "logs"
+    New-Item -ItemType Directory -Force -Path $logDir | Out-Null
+    $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
+    return Join-Path $logDir ("viddispatch-{0}.log" -f $stamp)
+}
+
+function Write-DebugLog {
+    param([Parameter(Mandatory = $true)][string]$Message)
+    if ([string]::IsNullOrWhiteSpace($script:DispatchDebugLogPath)) { return }
+    $ts = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    Add-Content -LiteralPath $script:DispatchDebugLogPath -Value ("[{0}] {1}" -f $ts, $Message)
+}
+
+function Write-DispatchDetail {
+    param(
+        [Parameter(Mandatory = $true)][string]$Message,
+        [Parameter(Mandatory = $false)][switch]$Warning,
+        [Parameter(Mandatory = $false)][switch]$AlwaysConsole
+    )
+
+    $level = if ($Warning) { "WARN" } else { "INFO" }
+    Write-DebugLog ("[{0}] {1}" -f $level, $Message)
+
+    if ($AlwaysConsole -or $VerboseConsole) {
+        if ($Warning) { Write-Warning $Message } else { Write-Host $Message }
+    }
+}
+
+function Show-StepProgress {
+    param(
+        [Parameter(Mandatory = $true)][int]$Percent,
+        [Parameter(Mandatory = $true)][string]$Status
+    )
+    Write-Progress -Activity "viddispatch pipeline" -Status $Status -PercentComplete $Percent
+}
+
+function Show-StepResult {
+    param(
+        [Parameter(Mandatory = $true)][string]$Step,
+        [Parameter(Mandatory = $true)][string]$Result,
+        [Parameter(Mandatory = $true)][string]$Detail,
+        [Parameter(Mandatory = $false)][double]$Seconds = -1
+    )
+    if ($Seconds -ge 0) {
+        Write-Host ("[{0}] {1} ({2}s) - {3}" -f $Result, $Step, ([math]::Round($Seconds, 1)), $Detail)
+    }
+    else {
+        Write-Host ("[{0}] {1} - {2}" -f $Result, $Step, $Detail)
+    }
+}
+
+function Start-StepTimer {
+    return [System.Diagnostics.Stopwatch]::StartNew()
+}
+
+function Stop-StepTimer {
+    param([Parameter(Mandatory = $true)][System.Diagnostics.Stopwatch]$Timer)
+    $Timer.Stop()
+    return [math]::Round($Timer.Elapsed.TotalSeconds, 1)
+}
+
+function Show-FinalScorecard {
+    param(
+        [Parameter(Mandatory = $true)][string]$Status,
+        [Parameter(Mandatory = $true)][double]$TotalSeconds,
+        [Parameter(Mandatory = $true)][int]$Picked,
+        [Parameter(Mandatory = $true)][int]$Unmatched,
+        [Parameter(Mandatory = $true)][int]$Encoded,
+        [Parameter(Mandatory = $true)][int]$EncodeFailed,
+        [Parameter(Mandatory = $true)][int]$Moved,
+        [Parameter(Mandatory = $true)][int]$MoveFailed,
+        [Parameter(Mandatory = $true)][int]$ReconcileInspected,
+        [Parameter(Mandatory = $true)][int]$ReconcileReplacedInflated,
+        [Parameter(Mandatory = $true)][int]$ReconcileDeletedSmaller,
+        [Parameter(Mandatory = $true)][int]$ReconcileKeptEqual,
+        [Parameter(Mandatory = $true)][int]$ReconcileErrors
+    )
+
+    Write-Host ""
+    Write-Host "Run scorecard"
+    Write-Host ("  status: {0}" -f $Status)
+    Write-Host ("  total:  {0}s" -f ([math]::Round($TotalSeconds, 1)))
+    Write-Host ("  pick/match/encode/move: {0}/{1}/{2}/{3}" -f $Picked, $Unmatched, $Encoded, $Moved)
+    Write-Host ("  encode_failed/move_failed: {0}/{1}" -f $EncodeFailed, $MoveFailed)
+    Write-Host ("  reconcile inspected/replaced/deleted_smaller/kept_equal/errors: {0}/{1}/{2}/{3}/{4}" -f $ReconcileInspected, $ReconcileReplacedInflated, $ReconcileDeletedSmaller, $ReconcileKeptEqual, $ReconcileErrors)
+}
 
 function Escape-Argument {
     param([Parameter(Mandatory = $true)][string]$Value)
@@ -102,8 +208,7 @@ function Invoke-ToolScript {
     $proc = New-Object System.Diagnostics.Process
     $proc.StartInfo = $psi
 
-    Write-Host ""
-    Write-Host "--- [$Label] ---"
+    Write-DebugLog ("BEGIN tool={0} exe={1} args={2}" -f $Label, $Exe, ($Arguments -join ' '))
     [void]$proc.Start()
 
     $stdout = $proc.StandardOutput.ReadToEnd()
@@ -112,10 +217,15 @@ function Invoke-ToolScript {
 
     $nl = [Environment]::NewLine
     if (-not [string]::IsNullOrWhiteSpace($stdout)) {
-        Write-Host ($stdout.TrimEnd() -replace "\r?\n", $nl)
+        Write-DebugLog ("STDOUT tool={0}:{1}{2}" -f $Label, $nl, ($stdout.TrimEnd() -replace "\r?\n", $nl))
     }
     if (-not [string]::IsNullOrWhiteSpace($stderr)) {
-        Write-Warning ($stderr.TrimEnd() -replace "\r?\n", $nl)
+        Write-DebugLog ("STDERR tool={0}:{1}{2}" -f $Label, $nl, ($stderr.TrimEnd() -replace "\r?\n", $nl))
+    }
+
+    if ($VerboseConsole) {
+        if (-not [string]::IsNullOrWhiteSpace($stdout)) { Write-Host ($stdout.TrimEnd() -replace "\r?\n", $nl) }
+        if (-not [string]::IsNullOrWhiteSpace($stderr)) { Write-Warning ($stderr.TrimEnd() -replace "\r?\n", $nl) }
     }
 
     $summaryLine = ($stdout -split "\r?\n") |
@@ -126,6 +236,7 @@ function Invoke-ToolScript {
         ExitCode = $proc.ExitCode
         Summary  = $summaryLine
         Stdout   = $stdout
+        Stderr   = $stderr
     }
 }
 
@@ -173,12 +284,11 @@ function Invoke-HandbrakeFinalReconcile {
     $missingFinalMatch = 0
     $cleanupErrors = 0
 
-    Write-Host ""
     if ($IsDryRun) {
-        Write-Host "--- [post-encode reconcile] [DRY RUN] ---"
+        Write-DispatchDetail -Message "post-encode reconcile start [DRY RUN]"
     }
     else {
-        Write-Host "--- [post-encode reconcile] ---"
+        Write-DispatchDetail -Message "post-encode reconcile start"
     }
 
     foreach ($hb in $handbrakeFiles) {
@@ -195,25 +305,25 @@ function Invoke-HandbrakeFinalReconcile {
 
         if ($smallestFinal.Length -gt $hb.Length) {
             if ($IsDryRun) {
-                Write-Host ("[NOISY][DRY RUN] Inflated final detected for '{0}': smallest final={1} bytes, handbrake source={2} bytes. Would replace final with untouched source and remove source from handbrake." -f $hb.Name, $smallestFinal.Length, $hb.Length)
+                Write-DispatchDetail -Message ("[DRY RUN] Inflated final for '{0}': smallest final={1} bytes, handbrake source={2} bytes." -f $hb.Name, $smallestFinal.Length, $hb.Length)
                 $replacedInflated++
                 $deletedFinalInflated += $matches.Count
                 continue
             }
 
-            Write-Warning ("[NOISY] Inflated final detected for '{0}': smallest final={1} bytes, handbrake source={2} bytes. Replacing final with untouched source." -f $hb.Name, $smallestFinal.Length, $hb.Length)
+            Write-DispatchDetail -Warning -Message ("Inflated final detected for '{0}': smallest final={1} bytes, handbrake source={2} bytes. Replacing final with source." -f $hb.Name, $smallestFinal.Length, $hb.Length)
 
             $deleteOk = $true
             foreach ($m in $matches) {
                 try {
                     Remove-Item -LiteralPath $m.FullName -Force
                     $deletedFinalInflated++
-                    Write-Warning ("[NOISY] Removed inflated final file: {0}" -f $m.FullName)
+                    Write-DispatchDetail -Warning -Message ("Removed inflated final file: {0}" -f $m.FullName)
                 }
                 catch {
                     $cleanupErrors++
                     $deleteOk = $false
-                    Write-Warning ("Failed to remove inflated final file '{0}': {1}" -f $m.FullName, $_.Exception.Message)
+                    Write-DispatchDetail -Warning -Message ("Failed to remove inflated final file '{0}': {1}" -f $m.FullName, $_.Exception.Message)
                 }
             }
 
@@ -221,12 +331,12 @@ function Invoke-HandbrakeFinalReconcile {
                 try {
                     $replacementPath = Join-Path $FinalDir $hb.Name
                     Move-Item -LiteralPath $hb.FullName -Destination $replacementPath -Force
-                    Write-Warning ("[NOISY] Replaced final with untouched source and removed handbrake copy: {0}" -f $replacementPath)
+                    Write-DispatchDetail -Warning -Message ("Replaced final with untouched source and removed handbrake copy: {0}" -f $replacementPath)
                     $replacedInflated++
                 }
                 catch {
                     $cleanupErrors++
-                    Write-Warning ("Failed to move replacement source '{0}' into final: {1}" -f $hb.FullName, $_.Exception.Message)
+                    Write-DispatchDetail -Warning -Message ("Failed to move replacement source '{0}' into final: {1}" -f $hb.FullName, $_.Exception.Message)
                 }
             }
 
@@ -235,19 +345,19 @@ function Invoke-HandbrakeFinalReconcile {
 
         if ($smallestFinal.Length -lt $hb.Length) {
             if ($IsDryRun) {
-                Write-Host ("[DRY RUN] Final is smaller for '{0}' (final={1}, handbrake={2}). Would delete from handbrake." -f $hb.Name, $smallestFinal.Length, $hb.Length)
+                Write-DispatchDetail -Message ("[DRY RUN] Final is smaller for '{0}' (final={1}, handbrake={2}). Would delete from handbrake." -f $hb.Name, $smallestFinal.Length, $hb.Length)
                 $deletedHandbrakeSmallerFinal++
                 continue
             }
 
             try {
                 Remove-Item -LiteralPath $hb.FullName -Force
-                Write-Host ("Deleted handbrake source after verified smaller final: {0}" -f $hb.FullName)
+                Write-DispatchDetail -Message ("Deleted handbrake source after verified smaller final: {0}" -f $hb.FullName)
                 $deletedHandbrakeSmallerFinal++
             }
             catch {
                 $cleanupErrors++
-                Write-Warning ("Failed to delete handbrake source '{0}': {1}" -f $hb.FullName, $_.Exception.Message)
+                Write-DispatchDetail -Warning -Message ("Failed to delete handbrake source '{0}': {1}" -f $hb.FullName, $_.Exception.Message)
             }
 
             continue
@@ -409,6 +519,7 @@ if (-not (Test-Path -LiteralPath $resolvedFinalDir -PathType Container)) {
 
 $dryRunFlag  = if ($DryRun.IsPresent)   { "true" } else { "false" }
 $skipPickFlag = if ($SkipPick.IsPresent) { "true" } else { "false" }
+$script:DispatchDebugLogPath = Initialize-DebugLogPath -RequestedPath $DebugLogPath
 
 Write-Host "viddispatch starting"
 if (-not $SkipPick) { Write-Host "  StagingDir:   $resolvedStagingDir" }
@@ -416,6 +527,11 @@ Write-Host "  HandbrakeDir: $resolvedHandbrakeDir"
 Write-Host "  FinalDir:     $resolvedFinalDir"
 if ($DryRun)   { Write-Host "  [DRY RUN]" }
 if ($SkipPick) { Write-Host "  [SKIP PICK]" }
+Write-Host ("  Debug log:    {0}" -f $script:DispatchDebugLogPath)
+if (-not $VerboseConsole) { Write-Host "  Console mode: clean (use -VerboseConsole for full child output)" }
+Write-DebugLog "viddispatch session started"
+Show-StepProgress -Percent 0 -Status "Initializing"
+$pipelineWatch = [System.Diagnostics.Stopwatch]::StartNew()
 
 if (-not $DryRun -and -not $NoConfirm) {
     Write-Host ""
@@ -450,18 +566,28 @@ $preflightArgs = @(
     "-NoConfirm"
 )
 
+$preflightWatch = Start-StepTimer
 $preflightResult = Invoke-ToolScript -Label "preflight: videncode" -Exe $psExe -Arguments $preflightArgs
+$preflightSeconds = Stop-StepTimer -Timer $preflightWatch
 if ($preflightResult.ExitCode -ne 0) {
-    Write-Warning "Preflight failed (videncode dependencies/config). Stopping before file moves."
+    Show-StepResult -Step "Preflight" -Result "FAIL" -Detail "videncode dependency/config check failed" -Seconds $preflightSeconds
+    Write-DispatchDetail -Warning -AlwaysConsole -Message "Preflight failed (videncode dependencies/config). Stopping before file moves."
+    $pipelineWatch.Stop()
+    Show-FinalScorecard -Status "failed" -TotalSeconds $pipelineWatch.Elapsed.TotalSeconds -Picked $dispatchPickedCount -Unmatched 0 -Encoded $dispatchEncoded -EncodeFailed $dispatchEncodeFailed -Moved $dispatchMoved -MoveFailed $dispatchMoveFailed -ReconcileInspected 0 -ReconcileReplacedInflated 0 -ReconcileDeletedSmaller 0 -ReconcileKeptEqual 0 -ReconcileErrors 0
+    Show-StepProgress -Percent 100 -Status "Failed"
+    Write-Progress -Activity "viddispatch pipeline" -Completed
     Write-Host "SUMMARY|tool=viddispatch|status=failed|dry_run=$dryRunFlag|skip_pick=$skipPickFlag|note=preflight_videncode_failed"
     exit 1
 }
+Show-StepResult -Step "Preflight" -Result "OK" -Detail "encode dependencies validated" -Seconds $preflightSeconds
+Show-StepProgress -Percent 20 -Status "Preflight complete"
 
 # ---------------------------------------------------------------------------
 # STEP 1: vidpicker (staging -> handbrake folder)
 # ---------------------------------------------------------------------------
 
 if (-not $SkipPick) {
+    $pickWatch = Start-StepTimer
     $pickerArgs = @(
         "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
         (Escape-Argument -Value $resolvedVidpickerScript),
@@ -472,9 +598,14 @@ if (-not $SkipPick) {
     if ($DryRun) { $pickerArgs += "-DryRun" }
 
     $pickerResult = Invoke-ToolScript -Label "vidpicker" -Exe $psExe -Arguments $pickerArgs
+    $pickSeconds = Stop-StepTimer -Timer $pickWatch
 
     if ($pickerResult.ExitCode -ne 0) {
-        Write-Warning "vidpicker exited with code $($pickerResult.ExitCode). Stopping."
+        Show-StepResult -Step "Pick" -Result "FAIL" -Detail ("vidpicker exited {0}" -f $pickerResult.ExitCode) -Seconds $pickSeconds
+        $pipelineWatch.Stop()
+        Show-FinalScorecard -Status "failed" -TotalSeconds $pipelineWatch.Elapsed.TotalSeconds -Picked $dispatchPickedCount -Unmatched 0 -Encoded $dispatchEncoded -EncodeFailed $dispatchEncodeFailed -Moved $dispatchMoved -MoveFailed $dispatchMoveFailed -ReconcileInspected 0 -ReconcileReplacedInflated 0 -ReconcileDeletedSmaller 0 -ReconcileKeptEqual 0 -ReconcileErrors 0
+        Show-StepProgress -Percent 100 -Status "Failed"
+        Write-Progress -Activity "viddispatch pipeline" -Completed
         Write-Host "SUMMARY|tool=viddispatch|status=failed|dry_run=$dryRunFlag|skip_pick=$skipPickFlag|note=vidpicker_failed"
         exit 1
     }
@@ -485,18 +616,26 @@ if (-not $SkipPick) {
             $dispatchPickedCount = [int]$pickedVal
         }
     }
+
+    Show-StepResult -Step "Pick" -Result "OK" -Detail ("moved={0}" -f $dispatchPickedCount) -Seconds $pickSeconds
 }
+else {
+    Show-StepResult -Step "Pick" -Result "SKIP" -Detail "-SkipPick enabled"
+}
+Show-StepProgress -Percent 45 -Status "Match analysis"
 
 # ---------------------------------------------------------------------------
 # STEP 2: vidmatch (handbrake folder vs final folder) - get unmatched list
 # ---------------------------------------------------------------------------
 
 $tempCsvPath = Join-Path ([System.IO.Path]::GetTempPath()) ("vidmatch-dispatch-" + [System.Guid]::NewGuid().ToString("N") + ".csv")
+$tempInputListPath = Join-Path ([System.IO.Path]::GetTempPath()) ("viddispatch-inputs-" + [System.Guid]::NewGuid().ToString("N") + ".txt")
 
 $dispatchUnmatchedCount = 0
 $inputFilesForEncode    = @()
 
 try {
+    $matchWatch = Start-StepTimer
     $matchArgs = @(
         "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
         (Escape-Argument -Value $resolvedVidmatchScript),
@@ -506,9 +645,14 @@ try {
     )
 
     $matchResult = Invoke-ToolScript -Label "vidmatch" -Exe $psExe -Arguments $matchArgs
+    $matchSeconds = Stop-StepTimer -Timer $matchWatch
 
     if ($matchResult.ExitCode -ne 0) {
-        Write-Warning "vidmatch exited with code $($matchResult.ExitCode). Stopping."
+        Show-StepResult -Step "Match" -Result "FAIL" -Detail ("vidmatch exited {0}" -f $matchResult.ExitCode) -Seconds $matchSeconds
+        $pipelineWatch.Stop()
+        Show-FinalScorecard -Status "failed" -TotalSeconds $pipelineWatch.Elapsed.TotalSeconds -Picked $dispatchPickedCount -Unmatched $dispatchUnmatchedCount -Encoded $dispatchEncoded -EncodeFailed $dispatchEncodeFailed -Moved $dispatchMoved -MoveFailed $dispatchMoveFailed -ReconcileInspected 0 -ReconcileReplacedInflated 0 -ReconcileDeletedSmaller 0 -ReconcileKeptEqual 0 -ReconcileErrors 0
+        Show-StepProgress -Percent 100 -Status "Failed"
+        Write-Progress -Activity "viddispatch pipeline" -Completed
         Write-Host "SUMMARY|tool=viddispatch|status=failed|dry_run=$dryRunFlag|skip_pick=$skipPickFlag|note=vidmatch_failed"
         exit 1
     }
@@ -531,10 +675,11 @@ try {
     }
 
     if ($dispatchUnmatchedCount -eq 0) {
-        Write-Host ""
-        Write-Host "No unmatched files found in handbrake folder. Skipping encode step."
+        Show-StepResult -Step "Match" -Result "OK" -Detail "unmatched=0" -Seconds $matchSeconds
+        Show-StepResult -Step "Encode" -Result "SKIP" -Detail "nothing to encode"
     }
     else {
+        Show-StepResult -Step "Match" -Result "OK" -Detail ("unmatched={0}" -f $dispatchUnmatchedCount) -Seconds $matchSeconds
         # ---------------------------------------------------------------------------
         # STEP 3: videncode (encode unmatched files -> final folder)
         # ---------------------------------------------------------------------------
@@ -544,15 +689,16 @@ try {
             (Escape-Argument -Value $resolvedVidencodeScript),
             "-SourceDir", (Escape-Argument -Value $resolvedHandbrakeDir),
             "-DestDir",   (Escape-Argument -Value $resolvedFinalDir),
-            "-InputFiles"
+            "-InputFilesListFile", (Escape-Argument -Value $tempInputListPath)
         )
-        foreach ($f in $inputFilesForEncode) {
-            $encodeArgs += Escape-Argument -Value $f
-        }
+        Set-Content -LiteralPath $tempInputListPath -Value $inputFilesForEncode -Encoding UTF8
+        Write-DebugLog ("encode input transport=list_file count={0}" -f $inputFilesForEncode.Count)
         $encodeArgs += "-NoConfirm"
         if ($DryRun) { $encodeArgs += "-DryRun" }
 
+        $encodeWatch = Start-StepTimer
         $encodeResult = Invoke-ToolScript -Label "videncode" -Exe $psExe -Arguments $encodeArgs
+        $encodeSeconds = Stop-StepTimer -Timer $encodeWatch
 
         if (-not [string]::IsNullOrWhiteSpace($encodeResult.Summary)) {
             $v = Get-SummaryField -Summary $encodeResult.Summary -Field "encoded"
@@ -566,17 +712,28 @@ try {
         }
 
         if ($encodeResult.ExitCode -ne 0) {
-            Write-Warning "videncode exited with code $($encodeResult.ExitCode)."
+            Show-StepResult -Step "Encode" -Result "FAIL" -Detail ("videncode exited {0}" -f $encodeResult.ExitCode) -Seconds $encodeSeconds
+            $pipelineWatch.Stop()
+            Show-FinalScorecard -Status "failed" -TotalSeconds $pipelineWatch.Elapsed.TotalSeconds -Picked $dispatchPickedCount -Unmatched $dispatchUnmatchedCount -Encoded $dispatchEncoded -EncodeFailed $dispatchEncodeFailed -Moved $dispatchMoved -MoveFailed $dispatchMoveFailed -ReconcileInspected 0 -ReconcileReplacedInflated 0 -ReconcileDeletedSmaller 0 -ReconcileKeptEqual 0 -ReconcileErrors 0
+            Show-StepProgress -Percent 100 -Status "Failed"
+            Write-Progress -Activity "viddispatch pipeline" -Completed
             Write-Host "SUMMARY|tool=viddispatch|status=failed|dry_run=$dryRunFlag|skip_pick=$skipPickFlag|picked=$dispatchPickedCount|unmatched=$dispatchUnmatchedCount|encoded=$dispatchEncoded|encode_failed=$dispatchEncodeFailed|moved=$dispatchMoved|move_failed=$dispatchMoveFailed|reconcile_inspected=0|reconcile_replaced_inflated=0|reconcile_deleted_final_inflated=0|reconcile_deleted_handbrake_smaller=0|reconcile_kept_equal=0|reconcile_missing_final_match=0|reconcile_errors=0"
             exit 1
         }
+
+        Show-StepResult -Step "Encode" -Result "OK" -Detail ("encoded={0} failed={1} moved={2}" -f $dispatchEncoded, $dispatchEncodeFailed, $dispatchMoved) -Seconds $encodeSeconds
     }
+
+    Show-StepProgress -Percent 75 -Status "Reconcile cleanup"
 
     # ---------------------------------------------------------------------------
     # STEP 4: reconcile handbrake leftovers vs final sizes
     # ---------------------------------------------------------------------------
 
+    $reconcileWatch = Start-StepTimer
     $reconcile = Invoke-HandbrakeFinalReconcile -HandbrakeDir $resolvedHandbrakeDir -FinalDir $resolvedFinalDir -IsDryRun $DryRun.IsPresent
+    $reconcileSeconds = Stop-StepTimer -Timer $reconcileWatch
+    Show-StepResult -Step "Reconcile" -Result "OK" -Detail ("inspected={0} replaced_inflated={1} deleted_smaller={2} kept_equal={3}" -f $reconcile.inspected, $reconcile.replaced_inflated, $reconcile.deleted_handbrake_smaller_final, $reconcile.kept_equal) -Seconds $reconcileSeconds
 
     $didWork = ($dispatchUnmatchedCount -gt 0 -or $dispatchEncoded -gt 0 -or $dispatchMoved -gt 0 -or $reconcile.replaced_inflated -gt 0 -or $reconcile.deleted_handbrake_smaller_final -gt 0)
     $status = if ($DryRun) {
@@ -589,11 +746,17 @@ try {
         "noop"
     }
 
-    Write-Host ""
+    Show-StepProgress -Percent 100 -Status "Complete"
+    Write-Progress -Activity "viddispatch pipeline" -Completed
+    $pipelineWatch.Stop()
+    Show-FinalScorecard -Status $status -TotalSeconds $pipelineWatch.Elapsed.TotalSeconds -Picked $dispatchPickedCount -Unmatched $dispatchUnmatchedCount -Encoded $dispatchEncoded -EncodeFailed $dispatchEncodeFailed -Moved $dispatchMoved -MoveFailed $dispatchMoveFailed -ReconcileInspected $reconcile.inspected -ReconcileReplacedInflated $reconcile.replaced_inflated -ReconcileDeletedSmaller $reconcile.deleted_handbrake_smaller_final -ReconcileKeptEqual $reconcile.kept_equal -ReconcileErrors $reconcile.cleanup_errors
     Write-Host "SUMMARY|tool=viddispatch|status=$status|dry_run=$dryRunFlag|skip_pick=$skipPickFlag|picked=$dispatchPickedCount|unmatched=$dispatchUnmatchedCount|encoded=$dispatchEncoded|encode_failed=$dispatchEncodeFailed|moved=$dispatchMoved|move_failed=$dispatchMoveFailed|reconcile_inspected=$($reconcile.inspected)|reconcile_replaced_inflated=$($reconcile.replaced_inflated)|reconcile_deleted_final_inflated=$($reconcile.deleted_final_inflated)|reconcile_deleted_handbrake_smaller=$($reconcile.deleted_handbrake_smaller_final)|reconcile_kept_equal=$($reconcile.kept_equal)|reconcile_missing_final_match=$($reconcile.missing_final_match)|reconcile_errors=$($reconcile.cleanup_errors)"
 }
 finally {
     if (Test-Path -LiteralPath $tempCsvPath) {
         Remove-Item -LiteralPath $tempCsvPath -Force -ErrorAction SilentlyContinue
+    }
+    if (Test-Path -LiteralPath $tempInputListPath) {
+        Remove-Item -LiteralPath $tempInputListPath -Force -ErrorAction SilentlyContinue
     }
 }

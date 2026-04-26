@@ -62,6 +62,24 @@ If the options file is missing, the script prompts to create it.
 | `-SkipPick` | switch | Skip the vidpicker step (useful if files are already in HandbrakeDir) |
 | `-DryRun` | switch | Propagate dry run to all tools; no files are moved or encoded |
 | `-NoConfirm` | switch | Propagate no-confirm to all tools; skip all confirmation prompts |
+| `-DebugLogPath` | string | Optional path for detailed dispatcher debug log; default is `viddispatch/logs/viddispatch-<timestamp>.log` |
+| `-VerboseConsole` | switch | Show full child tool output in console (default is clean dashboard mode) |
+
+## Console UX
+
+By default, `viddispatch` runs in a clean dashboard-style console mode:
+
+- one-line step results (`[OK]`, `[SKIP]`, `[FAIL]`)
+- progress bar across pipeline stages
+- final parseable `SUMMARY|...` line
+
+In `viddispatch.ps7.ps1`, step status labels are color-accented when the terminal supports ANSI
+(`OK`=green, `SKIP`=yellow, `FAIL`=red). The PS5 script keeps plain text output for compatibility.
+
+Detailed subprocess output (stdout/stderr from `vidpicker`, `vidmatch`, `videncode`, and reconcile details)
+is written to a debug log file instead of flooding the terminal.
+
+Use `-VerboseConsole` if you want the full legacy-style child output on screen.
 
 ## Common Command Line Usage
 
@@ -99,6 +117,18 @@ If the options file is missing, the script prompts to create it.
   -NoConfirm
 ```
 
+### 6) Keep console clean and send audit details to a custom log file
+
+```powershell
+.\viddispatch.ps1 -NoConfirm -DebugLogPath "C:/logs/viddispatch-run.log"
+```
+
+### 7) Show full child tool output on screen (debug session)
+
+```powershell
+.\viddispatch.ps1 -NoConfirm -VerboseConsole
+```
+
 ## Pipeline Detail
 
 ### Step 1 - vidpicker
@@ -132,7 +162,7 @@ After the encode step (or after a no-unmatched result), the dispatcher scans vid
 Rules:
 
 - If the smallest matching final file is larger than the handbrake source file:
-remove the inflated final file(s), move the untouched handbrake source file into `FinalDir`, and emit noisy output markers (`[NOISY]`).
+remove the inflated final file(s), move the untouched handbrake source file into `FinalDir`.
 
 - If the smallest matching final file is smaller than the handbrake source file:
 delete the handbrake source file.
@@ -156,6 +186,7 @@ Each tool reads its own `options.json` for encoding settings (preset, extensions
 - `-DryRun` propagates to both: no files are moved or encoded.
 - A videncode preflight check runs first to ensure encode dependencies are available before destructive steps.
 - If any step fails (non-zero exit), the pipeline stops immediately.
+- Detailed audit output is always preserved in the dispatcher debug log file.
 
 ## SUMMARY Output
 
