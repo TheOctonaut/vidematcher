@@ -57,6 +57,7 @@ $exampleOptionsFileName = "options.json.example"
 # ---------------------------------------------------------------------------
 
 $script:DispatchDebugLogPath = $null
+$script:DispatchDebugLogFallbackActivated = $false
 
 function Initialize-DebugLogPath {
     param([string]$RequestedPath)
@@ -79,7 +80,33 @@ function Write-DebugLog {
     param([Parameter(Mandatory = $true)][string]$Message)
     if ([string]::IsNullOrWhiteSpace($script:DispatchDebugLogPath)) { return }
     $ts = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-    Add-Content -LiteralPath $script:DispatchDebugLogPath -Value ("[{0}] {1}" -f $ts, $Message)
+    $line = "[{0}] {1}" -f $ts, $Message
+
+    try {
+        Add-Content -LiteralPath $script:DispatchDebugLogPath -Value $line -ErrorAction Stop
+        return
+    }
+    catch {
+        if (-not $script:DispatchDebugLogFallbackActivated) {
+            $originalPath = $script:DispatchDebugLogPath
+            $parent = Split-Path -Parent $originalPath
+            if ([string]::IsNullOrWhiteSpace($parent)) {
+                $parent = Join-Path $scriptRoot "logs"
+            }
+            $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
+            $fallbackPath = Join-Path $parent ("viddispatch-fallback-{0}-{1}.log" -f $stamp, $PID)
+            $script:DispatchDebugLogPath = $fallbackPath
+            $script:DispatchDebugLogFallbackActivated = $true
+
+            try {
+                Add-Content -LiteralPath $script:DispatchDebugLogPath -Value ("[{0}] [WARN] switched_log_file original={1} reason={2}" -f $ts, $originalPath, $_.Exception.Message) -ErrorAction Stop
+                Add-Content -LiteralPath $script:DispatchDebugLogPath -Value $line -ErrorAction Stop
+            }
+            catch {
+                # Logging must never interrupt the pipeline.
+            }
+        }
+    }
 }
 
 function Write-DispatchDetail {

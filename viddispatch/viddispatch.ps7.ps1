@@ -57,6 +57,7 @@ $exampleOptionsFileName = "options.json.example"
 # ---------------------------------------------------------------------------
 
 $script:DispatchDebugLogPath = $null
+$script:DispatchDebugLogFallbackActivated = $false
 
 function Initialize-DebugLogPath {
     param([string]$RequestedPath)
@@ -79,7 +80,33 @@ function Write-DebugLog {
     param([Parameter(Mandatory = $true)][string]$Message)
     if ([string]::IsNullOrWhiteSpace($script:DispatchDebugLogPath)) { return }
     $ts = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-    Add-Content -LiteralPath $script:DispatchDebugLogPath -Value ("[{0}] {1}" -f $ts, $Message)
+    $line = "[{0}] {1}" -f $ts, $Message
+
+    try {
+        Add-Content -LiteralPath $script:DispatchDebugLogPath -Value $line -ErrorAction Stop
+        return
+    }
+    catch {
+        if (-not $script:DispatchDebugLogFallbackActivated) {
+            $originalPath = $script:DispatchDebugLogPath
+            $parent = Split-Path -Parent $originalPath
+            if ([string]::IsNullOrWhiteSpace($parent)) {
+                $parent = Join-Path $scriptRoot "logs"
+            }
+            $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
+            $fallbackPath = Join-Path $parent ("viddispatch-fallback-{0}-{1}.log" -f $stamp, $PID)
+            $script:DispatchDebugLogPath = $fallbackPath
+            $script:DispatchDebugLogFallbackActivated = $true
+
+            try {
+                Add-Content -LiteralPath $script:DispatchDebugLogPath -Value ("[{0}] [WARN] switched_log_file original={1} reason={2}" -f $ts, $originalPath, $_.Exception.Message) -ErrorAction Stop
+                Add-Content -LiteralPath $script:DispatchDebugLogPath -Value $line -ErrorAction Stop
+            }
+            catch {
+                # Logging must never interrupt the pipeline.
+            }
+        }
+    }
 }
 
 function Write-DispatchDetail {
@@ -114,23 +141,22 @@ function Show-StepResult {
     )
 
     $label = "[{0}]" -f $Result
-    $supportsAnsi = $false
+    $useColor = $false
     try {
-        $supportsAnsi = ($Host.UI -and $Host.UI.SupportsVirtualTerminal -and -not [Console]::IsOutputRedirected)
+        $useColor = ($null -ne $PSStyle -and $PSStyle.OutputRendering -ne "PlainText")
     }
     catch {
-        $supportsAnsi = $false
+        $useColor = $false
     }
 
-    if ($supportsAnsi) {
-        $reset = "`e[0m"
-        $color = switch ($Result) {
-            "OK"   { "`e[32m"; break }
-            "SKIP" { "`e[33m"; break }
-            "FAIL" { "`e[31m"; break }
-            default { "`e[36m"; break }
+    if ($useColor) {
+        $colorPrefix = switch ($Result) {
+            "OK"   { $PSStyle.Foreground.BrightGreen; break }
+            "SKIP" { $PSStyle.Foreground.BrightYellow; break }
+            "FAIL" { $PSStyle.Foreground.BrightRed; break }
+            default { $PSStyle.Foreground.BrightCyan; break }
         }
-        $label = "{0}{1}{2}" -f $color, $label, $reset
+        $label = "{0}{1}{2}" -f $colorPrefix, $label, $PSStyle.Reset
     }
 
     if ($Seconds -ge 0) {
