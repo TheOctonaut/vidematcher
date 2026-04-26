@@ -150,6 +150,75 @@ Design each tool so a future dispatcher can call it consistently without knowing
   - document parameters, exit behavior, and destructive safety controls
   - include one example suitable for unattended/automated execution
 
+## Dispatcher Lessons From Real Runs
+
+Carry these decisions forward for `viddispatch` and related tools.
+
+- Prefer structured `SUMMARY|...` status over raw process exit code when both are available.
+  - For streamed child processes (`Start-Process -PassThru` + redirected stdout/stderr), treat `SUMMARY|status=ok|...` and `SUMMARY|status=noop|...` as success.
+  - Use exit code as a fallback when no summary line is present.
+  - Reason: some host/process combinations can report misleading non-zero/null exit code even when work succeeded.
+- Preserve streaming progress state in reference types when callbacks are scriptblocks.
+  - In `OnStdoutLine`/`OnStderrLine` callbacks, use a hashtable/object (`$state`) for mutable counters instead of relying on scalar variables.
+  - Reason: scalar assignments in callback scope can produce stale parent values and broken ETA/progress behavior.
+- ETA guidance for encode progress:
+  - Compute ETA from `PROGRESS|event=update` events (completed file boundaries), not `event=start`.
+  - Show `estimating...` until at least one completed file establishes throughput.
+  - Suppress ETA when final item is complete instead of printing misleading `0s`.
+- Always clear stale progress UI at run start.
+  - Call `Write-Progress -Activity "viddispatch pipeline" -Completed` before printing run header.
+  - Start initial progress updates after confirmation prompts to avoid overlaying/garbling prompt output.
+- Keep console mode operator-friendly by default.
+  - Default to compact status output with a clean scorecard.
+  - Keep full child stdout/stderr behind `-VerboseConsole`.
+- Keep debug logging non-fatal.
+  - If log file write fails (file lock/permission race), switch to a fallback log path and continue pipeline execution.
+  - Never fail file operations solely because debug logging failed.
+- For multi-file transport between dispatcher and tools, prefer list-file handoff.
+  - Use a temp text file (`-InputFilesListFile`) for candidate paths.
+  - Avoid large inline argument lists for file paths with spaces/special characters.
+- Reconcile cleanup is a required post-encode safety net.
+  - Do not skip reconcile after successful encode.
+  - Ensure failure gating does not falsely abort before cleanup.
+- Progress protocol expectations for encode tools:
+  - Emit parseable `PROGRESS|tool=<tool>|event=<start|update|complete>|...` lines.
+  - Keep key names stable (`index`, `total`, `file`, `elapsed_seconds`, `encoded`, `encode_failed`, `moved`, `move_failed`).
+  - Keep values ASCII-safe and delimiter-safe (sanitize `|` in values).
+- Validation discipline after any script changes:
+  - Parse-check every touched `.ps1` file before finishing.
+  - Prefer a small real-world smoke run when changes affect orchestration or progress rendering.
+
+## Observed Operator Preferences
+
+These are behavior/design preferences inferred from collaboration in this repo. Favor these defaults unless the user asks otherwise.
+
+- Prefer practical signal over theoretical correctness.
+  - Validate with realistic end-to-end runs and real logs, not only unit-level or synthetic checks.
+  - When real run results disagree with expected behavior, trust observed outputs first and debug from evidence.
+- Prioritize clear operator trust signals.
+  - If a run fails, always show a concrete reason in plain language.
+  - Keep the scorecard aligned with actual outcomes (avoid contradictory states like `failed` with zero failures).
+  - Surface key counters in failure messages when possible.
+- Favor concise, readable console UX.
+  - Keep routine output compact and scannable.
+  - Avoid visual artifacts (stale progress bars, overlayed output, noisy child logs in default mode).
+  - Preserve a stable layout where final scorecard and summary are easy to find.
+- Treat ETA as guidance, not filler.
+  - Show ETA only when statistically meaningful.
+  - Prefer `estimating...` or omitted ETA over misleading values.
+- Keep automation resilient to non-critical faults.
+  - Non-essential concerns (for example debug log lock conflicts) must degrade gracefully, not abort successful work.
+- Protect destructive workflows with explicitness.
+  - Retain dry-run previews, confirmation gates, and explicit summaries for move/delete operations.
+  - Ensure cleanup/reconcile stages are not skipped by false negatives in earlier step checks.
+- Maintain parity across PS5/PS7 implementations.
+  - When changing shared orchestration behavior, update both script variants unless intentionally diverging.
+  - Avoid features that silently work in one host but degrade in the other.
+- Prefer root-cause fixes over cosmetic workarounds.
+  - Solve the underlying decision logic (for example success/failure gating) rather than suppressing visible symptoms.
+- Preserve continuity in long sessions.
+  - After significant debugging rounds, encode decisions and pitfalls into repo instructions so future work starts with established context.
+
 ## Repository Hygiene
 
 - `.gitignore` should include `options.json`, `*.csv`, and `*.lnk` patterns as needed.
