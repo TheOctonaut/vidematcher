@@ -120,6 +120,13 @@ function Resolve-InputFilePath {
     return [System.IO.Path]::GetFullPath((Join-Path $SourceRoot $Item))
 }
 
+function ConvertTo-ProgressValue {
+    param([string]$Value)
+
+    if ($null -eq $Value) { return "" }
+    return (($Value -replace "\|", "/") -replace "\r?\n", " ")
+}
+
 $defaults = [PSCustomObject]@{
     HandBrakeCliPath = "HandBrakeCLI"
     OutputExtension  = ".mp4"
@@ -427,11 +434,18 @@ $encoded = 0
 $encodeFailed = 0
 $moved = 0
 $moveFailed = 0
+$encodeSessionWatch = [System.Diagnostics.Stopwatch]::StartNew()
+$selectedTotal = $selected.Count
+$fileIndex = 0
 
 foreach ($file in $selected) {
+    $fileIndex++
     $outName = $file.BaseName + $resolvedOutputExtension
     $tempOutput = Join-Path $tempOutDir $outName
     $destOutput = Join-Path $destRoot $outName
+    $progressFile = ConvertTo-ProgressValue -Value $file.FullName
+
+    Write-Host ("PROGRESS|tool=videncode|event=start|index={0}|total={1}|file={2}|encoded={3}|encode_failed={4}|moved={5}|move_failed={6}|elapsed_seconds={7}" -f $fileIndex, $selectedTotal, $progressFile, $encoded, $encodeFailed, $moved, $moveFailed, ([math]::Round($encodeSessionWatch.Elapsed.TotalSeconds, 1)))
 
     if (Test-Path -LiteralPath $tempOutput -PathType Leaf) {
         Remove-Item -LiteralPath $tempOutput -Force
@@ -480,6 +494,10 @@ foreach ($file in $selected) {
         if (-not [string]::IsNullOrWhiteSpace($stderr)) {
             Write-Warning ($stderr.TrimEnd() -replace "\r?\n", [Environment]::NewLine)
         }
+        if (Test-Path -LiteralPath $tempOutput -PathType Leaf) {
+            Remove-Item -LiteralPath $tempOutput -Force -ErrorAction SilentlyContinue
+        }
+        Write-Host ("PROGRESS|tool=videncode|event=update|index={0}|total={1}|file={2}|encoded={3}|encode_failed={4}|moved={5}|move_failed={6}|elapsed_seconds={7}" -f $fileIndex, $selectedTotal, $progressFile, $encoded, $encodeFailed, $moved, $moveFailed, ([math]::Round($encodeSessionWatch.Elapsed.TotalSeconds, 1)))
         continue
     }
 
@@ -494,7 +512,12 @@ foreach ($file in $selected) {
         $moveFailed++
         Write-Warning "Failed to move encoded output to destination: $($_.Exception.Message)"
     }
+
+    Write-Host ("PROGRESS|tool=videncode|event=update|index={0}|total={1}|file={2}|encoded={3}|encode_failed={4}|moved={5}|move_failed={6}|elapsed_seconds={7}" -f $fileIndex, $selectedTotal, $progressFile, $encoded, $encodeFailed, $moved, $moveFailed, ([math]::Round($encodeSessionWatch.Elapsed.TotalSeconds, 1)))
 }
+
+$encodeSessionWatch.Stop()
+Write-Host ("PROGRESS|tool=videncode|event=complete|index={0}|total={1}|encoded={2}|encode_failed={3}|moved={4}|move_failed={5}|elapsed_seconds={6}" -f $selectedTotal, $selectedTotal, $encoded, $encodeFailed, $moved, $moveFailed, ([math]::Round($encodeSessionWatch.Elapsed.TotalSeconds, 1)))
 
 $status = if ($encodeFailed -gt 0 -or $moveFailed -gt 0) { "failed" } else { "ok" }
 

@@ -58,6 +58,7 @@ $exampleOptionsFileName = "options.json.example"
 
 $script:DispatchDebugLogPath = $null
 $script:DispatchDebugLogFallbackActivated = $false
+$script:ActiveToolProcess = $null
 
 function Initialize-DebugLogPath {
     param([string]$RequestedPath)
@@ -264,6 +265,158 @@ function Invoke-ToolScript {
         Summary  = $summaryLine
         Stdout   = $stdout
         Stderr   = $stderr
+    }
+}
+
+function Stop-ActiveToolProcess {
+    if ($null -eq $script:ActiveToolProcess) { return }
+    try {
+        if (-not $script:ActiveToolProcess.HasExited) {
+            $script:ActiveToolProcess.Kill()
+            [void]$script:ActiveToolProcess.WaitForExit(3000)
+        }
+    }
+    catch {
+        # Best effort only.
+    }
+    finally {
+        $script:ActiveToolProcess = $null
+    }
+}
+
+function Format-Elapsed {
+    param([double]$Seconds)
+
+    if ($Seconds -lt 0) { return "n/a" }
+    $ts = [TimeSpan]::FromSeconds([math]::Round($Seconds, 0))
+    if ($ts.TotalHours -ge 1) {
+        return "{0}h {1}m {2}s" -f [int]$ts.TotalHours, $ts.Minutes, $ts.Seconds
+    }
+    if ($ts.TotalMinutes -ge 1) {
+        return "{0}m {1}s" -f [int]$ts.TotalMinutes, $ts.Seconds
+    }
+    return "{0}s" -f [int]$ts.TotalSeconds
+}
+
+function ConvertTo-KeyValueMap {
+    param([string]$Line)
+
+    $map = @{}
+    foreach ($part in ($Line -split "\|")) {
+        if ($part -match "=") {
+            $kv = $part -split "=", 2
+            $map[$kv[0]] = $kv[1]
+        }
+    }
+    return $map
+}
+
+function Get-MapIntValue {
+    param(
+        [Parameter(Mandatory = $true)][hashtable]$Map,
+        [Parameter(Mandatory = $true)][string]$Key,
+        [Parameter(Mandatory = $false)][int]$Default = 0
+    )
+
+    if (-not $Map.ContainsKey($Key)) { return $Default }
+    $parsed = 0
+    if ([int]::TryParse([string]$Map[$Key], [ref]$parsed)) { return $parsed }
+    return $Default
+}
+
+function Get-MapDoubleValue {
+    param(
+        [Parameter(Mandatory = $true)][hashtable]$Map,
+        [Parameter(Mandatory = $true)][string]$Key,
+        [Parameter(Mandatory = $false)][double]$Default = 0
+    )
+
+    if (-not $Map.ContainsKey($Key)) { return $Default }
+    $parsed = 0.0
+    if ([double]::TryParse([string]$Map[$Key], [System.Globalization.NumberStyles]::Float, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$parsed)) {
+        return $parsed
+    }
+    return $Default
+}
+
+function Invoke-ToolScriptStreaming {
+    param(
+        [Parameter(Mandatory = $true)][string]$Label,
+        [Parameter(Mandatory = $true)][string]$Exe,
+        [Parameter(Mandatory = $true)][string[]]$Arguments,
+        [Parameter(Mandatory = $false)][scriptblock]$OnStdoutLine,
+        [Parameter(Mandatory = $false)][scriptblock]$OnStderrLine
+    )
+
+    $stdoutPath = [System.IO.Path]::GetTempFileName()
+    $stderrPath = [System.IO.Path]::GetTempFileName()
+    $proc = $null
+    $stdoutIndex = 0
+    $stderrIndex = 0
+
+    try {
+        Write-DebugLog ("BEGIN tool={0} exe={1} args={2}" -f $Label, $Exe, ($Arguments -join ' '))
+        $proc = Start-Process -FilePath $Exe -ArgumentList ($Arguments -join " ") -NoNewWindow -PassThru -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
+        $script:ActiveToolProcess = $proc
+
+        while (-not $proc.HasExited) {
+            $stdoutLines = @(Get-Content -LiteralPath $stdoutPath -ErrorAction SilentlyContinue)
+            for ($i = $stdoutIndex; $i -lt $stdoutLines.Count; $i++) {
+                if ($null -ne $OnStdoutLine) { & $OnStdoutLine ([string]$stdoutLines[$i]) }
+            }
+            $stdoutIndex = $stdoutLines.Count
+
+            $stderrLines = @(Get-Content -LiteralPath $stderrPath -ErrorAction SilentlyContinue)
+            for ($i = $stderrIndex; $i -lt $stderrLines.Count; $i++) {
+                if ($null -ne $OnStderrLine) { & $OnStderrLine ([string]$stderrLines[$i]) }
+            }
+            $stderrIndex = $stderrLines.Count
+
+            Start-Sleep -Milliseconds 250
+        }
+
+        [void]$proc.WaitForExit()
+
+        $stdoutLines = @(Get-Content -LiteralPath $stdoutPath -ErrorAction SilentlyContinue)
+        for ($i = $stdoutIndex; $i -lt $stdoutLines.Count; $i++) {
+            if ($null -ne $OnStdoutLine) { & $OnStdoutLine ([string]$stdoutLines[$i]) }
+        }
+
+        $stderrLines = @(Get-Content -LiteralPath $stderrPath -ErrorAction SilentlyContinue)
+        for ($i = $stderrIndex; $i -lt $stderrLines.Count; $i++) {
+            if ($null -ne $OnStderrLine) { & $OnStderrLine ([string]$stderrLines[$i]) }
+        }
+
+        $stdout = if (Test-Path -LiteralPath $stdoutPath -PathType Leaf) { Get-Content -LiteralPath $stdoutPath -Raw -ErrorAction SilentlyContinue } else { "" }
+        $stderr = if (Test-Path -LiteralPath $stderrPath -PathType Leaf) { Get-Content -LiteralPath $stderrPath -Raw -ErrorAction SilentlyContinue } else { "" }
+
+        $nl = [Environment]::NewLine
+        if (-not [string]::IsNullOrWhiteSpace($stdout)) {
+            Write-DebugLog ("STDOUT tool={0}:{1}{2}" -f $Label, $nl, ($stdout.TrimEnd() -replace "\r?\n", $nl))
+        }
+        if (-not [string]::IsNullOrWhiteSpace($stderr)) {
+            Write-DebugLog ("STDERR tool={0}:{1}{2}" -f $Label, $nl, ($stderr.TrimEnd() -replace "\r?\n", $nl))
+        }
+
+        $summaryLine = ($stdout -split "\r?\n") |
+            Where-Object { $_.StartsWith("SUMMARY|") } |
+            Select-Object -Last 1
+
+        return [PSCustomObject]@{
+            ExitCode = $proc.ExitCode
+            Summary  = $summaryLine
+            Stdout   = $stdout
+            Stderr   = $stderr
+        }
+    }
+    finally {
+        Stop-ActiveToolProcess
+        if (Test-Path -LiteralPath $stdoutPath -PathType Leaf) {
+            Remove-Item -LiteralPath $stdoutPath -Force -ErrorAction SilentlyContinue
+        }
+        if (Test-Path -LiteralPath $stderrPath -PathType Leaf) {
+            Remove-Item -LiteralPath $stderrPath -Force -ErrorAction SilentlyContinue
+        }
     }
 }
 
@@ -548,6 +701,7 @@ $dryRunFlag  = if ($DryRun.IsPresent)   { "true" } else { "false" }
 $skipPickFlag = if ($SkipPick.IsPresent) { "true" } else { "false" }
 $script:DispatchDebugLogPath = Initialize-DebugLogPath -RequestedPath $DebugLogPath
 
+Write-Progress -Activity "viddispatch pipeline" -Completed
 Write-Host "viddispatch starting"
 if (-not $SkipPick) { Write-Host "  StagingDir:   $resolvedStagingDir" }
 Write-Host "  HandbrakeDir: $resolvedHandbrakeDir"
@@ -557,7 +711,6 @@ if ($SkipPick) { Write-Host "  [SKIP PICK]" }
 Write-Host ("  Debug log:    {0}" -f $script:DispatchDebugLogPath)
 if (-not $VerboseConsole) { Write-Host "  Console mode: clean (use -VerboseConsole for full child output)" }
 Write-DebugLog "viddispatch session started"
-Show-StepProgress -Percent 0 -Status "Initializing"
 $pipelineWatch = [System.Diagnostics.Stopwatch]::StartNew()
 
 if (-not $DryRun -and -not $NoConfirm) {
@@ -570,6 +723,7 @@ if (-not $DryRun -and -not $NoConfirm) {
         exit 0
     }
 }
+Show-StepProgress -Percent 0 -Status "Initializing"
 
 $psExe = Get-PowerShellExe
 
@@ -649,7 +803,7 @@ if (-not $SkipPick) {
 else {
     Show-StepResult -Step "Pick" -Result "SKIP" -Detail "-SkipPick enabled"
 }
-Show-StepProgress -Percent 45 -Status "Match analysis"
+Show-StepProgress -Percent 45 -Status "Matching source vs final"
 
 # ---------------------------------------------------------------------------
 # STEP 2: vidmatch (handbrake folder vs final folder) - get unmatched list
@@ -724,7 +878,82 @@ try {
         if ($DryRun) { $encodeArgs += "-DryRun" }
 
         $encodeWatch = Start-StepTimer
-        $encodeResult = Invoke-ToolScript -Label "videncode" -Exe $psExe -Arguments $encodeArgs
+        $encodeState = @{
+            index   = 0
+            total   = $dispatchUnmatchedCount
+            file    = ""
+            elapsed = 0.0
+            eta     = "estimating..."
+        }
+        Show-StepProgress -Percent 50 -Status ("Encoding 0/{0}" -f $encodeState.total)
+
+        $onEncodeStdout = {
+            param([string]$Line)
+
+            if ([string]::IsNullOrWhiteSpace($Line)) { return }
+
+            if ($Line.StartsWith("PROGRESS|tool=videncode|")) {
+                $progressMap = ConvertTo-KeyValueMap -Line $Line
+                $evt = if ($progressMap.ContainsKey("event")) { $progressMap["event"] } else { "" }
+                if ($progressMap.ContainsKey("file") -and -not [string]::IsNullOrWhiteSpace($progressMap["file"])) {
+                    $encodeState.file = $progressMap["file"]
+                }
+                $encodeState.index   = Get-MapIntValue    -Map $progressMap -Key "index"           -Default $encodeState.index
+                $encodeState.total   = Get-MapIntValue    -Map $progressMap -Key "total"           -Default $encodeState.total
+                $encodeState.elapsed = Get-MapDoubleValue -Map $progressMap -Key "elapsed_seconds" -Default $encodeState.elapsed
+
+                if ($encodeState.total -le 0) { $encodeState.total = $dispatchUnmatchedCount }
+                if ($encodeState.index -gt $encodeState.total) { $encodeState.index = $encodeState.total }
+
+                if ($evt -eq "update") {
+                    if ($encodeState.index -gt 0 -and $encodeState.index -lt $encodeState.total -and $encodeState.elapsed -gt 0) {
+                        $avg = $encodeState.elapsed / [double]$encodeState.index
+                        $encodeState.eta = Format-Elapsed -Seconds ($avg * ($encodeState.total - $encodeState.index))
+                    }
+                    elseif ($encodeState.index -ge $encodeState.total) {
+                        $encodeState.eta = ""
+                    }
+                }
+
+                $progressPercent = 50
+                if ($encodeState.total -gt 0) {
+                    $fraction = [math]::Min(1.0, ([double]$encodeState.index / [double]$encodeState.total))
+                    $progressPercent = 50 + [int][math]::Round($fraction * 25)
+                }
+
+                $currentName = if ([string]::IsNullOrWhiteSpace($encodeState.file)) { "-" } else { [System.IO.Path]::GetFileName($encodeState.file) }
+                $etaDisplay  = if ([string]::IsNullOrWhiteSpace($encodeState.eta)) { "" } else { " | ETA $($encodeState.eta)" }
+                $status = "Encoding {0}/{1} | {2}{3}" -f $encodeState.index, $encodeState.total, $currentName, $etaDisplay
+                Show-StepProgress -Percent $progressPercent -Status $status
+                return
+            }
+
+            if ($VerboseConsole) {
+                Write-Host $Line
+            }
+        }
+
+        $onEncodeStderr = {
+            param([string]$Line)
+            if ([string]::IsNullOrWhiteSpace($Line)) { return }
+            if ($VerboseConsole) { Write-Warning $Line }
+        }
+
+        try {
+            $encodeResult = Invoke-ToolScriptStreaming -Label "videncode" -Exe $psExe -Arguments $encodeArgs -OnStdoutLine $onEncodeStdout -OnStderrLine $onEncodeStderr
+        }
+        catch [System.Management.Automation.PipelineStoppedException] {
+            Stop-ActiveToolProcess
+            $encodeSeconds = Stop-StepTimer -Timer $encodeWatch
+            Show-StepResult -Step "Encode" -Result "FAIL" -Detail "interrupted by user; active encode stopped and remaining files left untouched" -Seconds $encodeSeconds
+            $pipelineWatch.Stop()
+            Show-FinalScorecard -Status "aborted" -TotalSeconds $pipelineWatch.Elapsed.TotalSeconds -Picked $dispatchPickedCount -Unmatched $dispatchUnmatchedCount -Encoded $dispatchEncoded -EncodeFailed $dispatchEncodeFailed -Moved $dispatchMoved -MoveFailed $dispatchMoveFailed -ReconcileInspected 0 -ReconcileReplacedInflated 0 -ReconcileDeletedSmaller 0 -ReconcileKeptEqual 0 -ReconcileErrors 0
+            Show-StepProgress -Percent 100 -Status "Aborted"
+            Write-Progress -Activity "viddispatch pipeline" -Completed
+            Write-Host "SUMMARY|tool=viddispatch|status=aborted|dry_run=$dryRunFlag|skip_pick=$skipPickFlag|picked=$dispatchPickedCount|unmatched=$dispatchUnmatchedCount|encoded=$dispatchEncoded|encode_failed=$dispatchEncodeFailed|moved=$dispatchMoved|move_failed=$dispatchMoveFailed|reconcile_inspected=0|reconcile_replaced_inflated=0|reconcile_deleted_final_inflated=0|reconcile_deleted_handbrake_smaller=0|reconcile_kept_equal=0|reconcile_missing_final_match=0|reconcile_errors=0|note=user_interrupted"
+            exit 130
+        }
+
         $encodeSeconds = Stop-StepTimer -Timer $encodeWatch
 
         if (-not [string]::IsNullOrWhiteSpace($encodeResult.Summary)) {
@@ -738,8 +967,20 @@ try {
             if ($null -ne $v) { $dispatchMoveFailed = [int]$v }
         }
 
-        if ($encodeResult.ExitCode -ne 0) {
-            Show-StepResult -Step "Encode" -Result "FAIL" -Detail ("videncode exited {0}" -f $encodeResult.ExitCode) -Seconds $encodeSeconds
+        $encodeSummaryStatus = $null
+        if (-not [string]::IsNullOrWhiteSpace($encodeResult.Summary)) {
+            $encodeSummaryStatus = Get-SummaryField -Summary $encodeResult.Summary -Field "status"
+        }
+        $encodeSucceeded = ($encodeSummaryStatus -eq "ok" -or $encodeSummaryStatus -eq "noop") -or
+                           ($null -eq $encodeSummaryStatus -and $encodeResult.ExitCode -eq 0)
+        if (-not $encodeSucceeded) {
+            $encodeFailDetail = if (-not [string]::IsNullOrWhiteSpace($encodeSummaryStatus)) {
+                "videncode status=$encodeSummaryStatus"
+            } else {
+                $encodeExitCodeText = if ($null -eq $encodeResult.ExitCode -or [string]::IsNullOrWhiteSpace([string]$encodeResult.ExitCode)) { "non-zero" } else { [string]$encodeResult.ExitCode }
+                "videncode exited $encodeExitCodeText"
+            }
+            Show-StepResult -Step "Encode" -Result "FAIL" -Detail $encodeFailDetail -Seconds $encodeSeconds
             $pipelineWatch.Stop()
             Show-FinalScorecard -Status "failed" -TotalSeconds $pipelineWatch.Elapsed.TotalSeconds -Picked $dispatchPickedCount -Unmatched $dispatchUnmatchedCount -Encoded $dispatchEncoded -EncodeFailed $dispatchEncodeFailed -Moved $dispatchMoved -MoveFailed $dispatchMoveFailed -ReconcileInspected 0 -ReconcileReplacedInflated 0 -ReconcileDeletedSmaller 0 -ReconcileKeptEqual 0 -ReconcileErrors 0
             Show-StepProgress -Percent 100 -Status "Failed"
