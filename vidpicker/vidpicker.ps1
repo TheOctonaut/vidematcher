@@ -28,7 +28,8 @@ if ([string]::IsNullOrWhiteSpace($scriptRoot)) {
     $scriptRoot = (Get-Location).Path
 }
 
-if ([string]::IsNullOrWhiteSpace($OptionsFile)) {
+$optionsFileExplicit = -not [string]::IsNullOrWhiteSpace($OptionsFile)
+if (-not $optionsFileExplicit) {
     $OptionsFile = Join-Path $scriptRoot "options.json"
 }
 
@@ -124,26 +125,34 @@ $defaults = [PSCustomObject]@{
 # ---------------------------------------------------------------------------
 
 if (-not (Test-Path -LiteralPath $OptionsFile -PathType Leaf)) {
-    Write-Host "Options file not found: $OptionsFile"
-    $response = Read-Host "Create it now? (Y/N)"
-
-    if ($response -match '^[Yy]') {
-        if (Test-Path -LiteralPath $exampleOptionsFile -PathType Leaf) {
-            Copy-Item -LiteralPath $exampleOptionsFile -Destination $OptionsFile -Force
-            Write-Host "Created options file from template: $OptionsFile"
-        }
-        else {
-            $defaultOptions = [ordered]@{
-                SourceDir  = "C:/path/to/source"
-                DestDir    = "C:/path/to/dest"
-                Extensions = $defaults.Extensions
-            }
-            $defaultOptions | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $OptionsFile -Encoding UTF8
-            Write-Host "Created options file with default values: $OptionsFile"
-        }
+    if ($NoConfirm -and -not $optionsFileExplicit) {
+        Write-Host "Options file not found: $OptionsFile (continuing without it)"
+    }
+    elseif ($optionsFileExplicit) {
+        throw "Options file not found: $OptionsFile"
     }
     else {
-        Write-Host "Continuing without options file."
+        Write-Host "Options file not found: $OptionsFile"
+        $response = Read-Host "Create it now? (Y/N)"
+
+        if ($response -match '^[Yy]') {
+            if (Test-Path -LiteralPath $exampleOptionsFile -PathType Leaf) {
+                Copy-Item -LiteralPath $exampleOptionsFile -Destination $OptionsFile -Force
+                Write-Host "Created options file from template: $OptionsFile"
+            }
+            else {
+                $defaultOptions = [ordered]@{
+                    SourceDir  = "C:/path/to/source"
+                    DestDir    = "C:/path/to/dest"
+                    Extensions = $defaults.Extensions
+                }
+                $defaultOptions | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $OptionsFile -Encoding UTF8
+                Write-Host "Created options file with default values: $OptionsFile"
+            }
+        }
+        else {
+            Write-Host "Continuing without options file."
+        }
     }
 }
 
