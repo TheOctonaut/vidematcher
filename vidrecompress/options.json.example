@@ -1,0 +1,10 @@
+{
+  "SourceDir": "Z:/",
+  "TempDir": "C:/path/to/temp-encode",
+  "PresetName": "My Custom Preset",
+  "PresetImportFile": "C:/path/to/custom-presets.json",
+  "HandBrakeCliPath": "HandBrakeCLI",
+  "OutputExtension": ".mp4",
+  "SourceExtensions": [".avi"],
+  "Recurse": false
+}
