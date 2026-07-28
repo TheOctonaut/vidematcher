@@ -80,10 +80,10 @@ During the run a `Write-Progress` bar shows the current file, position, and ETA:
 vidrecompress [12/88 | PureTaboo.23.11.07.Madi.Collins... | ETA 6h 12m]
 ```
 
-Each completed file prints one result line:
+Each completed file prints one result line with per-file saved size and running session total:
 
 ```
-Replaced: PureTaboo.23.11.07.Madi.Collins.XXX.XviD-iPT Team.avi (382 MB -> 297 MB, saved 85 MB)
+Replaced: PureTaboo.23.11.07.Madi.Collins.XXX.XviD-iPT Team.avi (382 MB -> 297 MB, saved 85.0 MB; total saved 1.3 GB)
 Kept original: SomeFile.avi (encoded 391 MB >= source 386 MB)
 ```
 
@@ -97,7 +97,7 @@ Recompress run
  skipped_existing:  4
  encoded:           84   failed: 0
  replaced:          79   kept_original: 5
- space_saved:       8234.7 MB
+ space_saved:       8.0 GB
 ```
 
 Raw `PROGRESS|` lines are suppressed by default. Use `-VerboseConsole` to print them (useful for scripted/dispatch consumption).

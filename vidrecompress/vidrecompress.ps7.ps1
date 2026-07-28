@@ -111,6 +111,14 @@ function Format-Eta {
     return "${s}s"
 }
 
+function Format-SavedSize {
+    param([long]$Bytes)
+    if ($Bytes -gt 1GB) {
+        return ("{0:N1} GB" -f ($Bytes / 1GB))
+    }
+    return ("{0:N1} MB" -f ($Bytes / 1MB))
+}
+
 function Get-DriveFreeBytes {
     param([Parameter(Mandatory = $true)][string]$Path)
     try {
@@ -500,8 +508,11 @@ try {
                         Remove-Item -LiteralPath $file.FullName -Force
                         Move-Item -LiteralPath $tempOutput -Destination $destOutput -Force
                         $replaced++
-                        $spaceSavedBytes += ($file.Length - $tempSize)
-                        Write-Host ("Replaced: {0} ({1:N0} -> {2:N0} bytes, saved {3:N0} bytes)" -f $file.Name, $file.Length, $tempSize, ($file.Length - $tempSize))
+                        $fileSavedBytes = ($file.Length - $tempSize)
+                        $spaceSavedBytes += $fileSavedBytes
+                        $fileSavedDisplay = Format-SavedSize -Bytes $fileSavedBytes
+                        $totalSavedDisplay = Format-SavedSize -Bytes $spaceSavedBytes
+                        Write-Host ("Replaced: {0} ({1:N0} -> {2:N0} bytes, saved {3}; total saved {4})" -f $file.Name, $file.Length, $tempSize, $fileSavedDisplay, $totalSavedDisplay)
                     }
                     catch {
                         Write-Warning "Failed to replace source file '$($file.FullName)': $($_.Exception.Message)"
@@ -573,6 +584,7 @@ else {
 
 $totalSecs = [math]::Round($sessionWatch.Elapsed.TotalSeconds, 1)
 $savedMb   = [math]::Round($spaceSavedBytes / 1MB, 1)
+$savedDisplay = Format-SavedSize -Bytes $spaceSavedBytes
 
 Write-Host ""
 Write-Host "Recompress run"
@@ -582,7 +594,7 @@ Write-Host (" candidates:        {0}" -f $candidateCount)
 Write-Host (" skipped_existing:  {0}" -f $skippedExisting)
 Write-Host (" encoded:           {0}  failed: {1}" -f $encoded, $encodeFailed)
 Write-Host (" replaced:          {0}  kept_original: {1}" -f $replaced, $keptOriginal)
-Write-Host (" space_saved:       {0} MB" -f $savedMb)
+Write-Host (" space_saved:       {0}" -f $savedDisplay)
 if ($skippedNoSpace -gt 0) {
     Write-Host (" skipped_no_space:  {0}" -f $skippedNoSpace)
 }
@@ -590,7 +602,7 @@ if ($warnings -gt 0) {
     Write-Host (" warnings:          {0}" -f $warnings)
 }
 Write-Host ""
-Write-Host ("SUMMARY|tool=vidrecompress|status={0}|dry_run=false|candidates={1}|skipped_existing={2}|skipped_no_space={3}|encoded={4}|encode_failed={5}|replaced={6}|kept_original={7}|space_saved_mb={8}|warnings={9}" -f $status, $candidateCount, $skippedExisting, $skippedNoSpace, $encoded, $encodeFailed, $replaced, $keptOriginal, ([math]::Round($spaceSavedBytes / 1MB, 1)), $warnings)
+Write-Host ("SUMMARY|tool=vidrecompress|status={0}|dry_run=false|candidates={1}|skipped_existing={2}|skipped_no_space={3}|encoded={4}|encode_failed={5}|replaced={6}|kept_original={7}|space_saved_mb={8}|warnings={9}" -f $status, $candidateCount, $skippedExisting, $skippedNoSpace, $encoded, $encodeFailed, $replaced, $keptOriginal, $savedMb, $warnings)
 
 if ($status -eq "failed") {
     exit 1
