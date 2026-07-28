@@ -37,7 +37,8 @@ This is an in-place recompression workflow — not the normal collect → pick �
 | `-Recurse` | No | `false` | Scan subdirectories |
 | `-OptionsFile` | No | sibling `options.json` | Path to options file |
 | `-DryRun` | No | — | Preview without making changes |
-| `-NoConfirm` | No | — | Skip confirmation prompt |
+| `-NoConfirm` | No | — | Skip confirmation prompt (also skips options file creation prompt) |
+| `-VerboseConsole` | No | — | Print raw `PROGRESS\|` lines to console (default: suppressed) |
 
 *Required unless provided via `options.json`.
 
@@ -71,9 +72,39 @@ Config precedence: CLI arguments > `options.json` > script defaults.
    - **Encoded is same size or larger**: deletes the temp file, keeps the original (not a failure).
 6. On error or interruption, cleans up any partial temp file for the current in-progress file.
 
+## Console output
+
+During the run a `Write-Progress` bar shows the current file, position, and ETA:
+
+```
+vidrecompress [12/88 | PureTaboo.23.11.07.Madi.Collins... | ETA 6h 12m]
+```
+
+Each completed file prints one result line:
+
+```
+Replaced: PureTaboo.23.11.07.Madi.Collins.XXX.XviD-iPT Team.avi (382 MB -> 297 MB, saved 85 MB)
+Kept original: SomeFile.avi (encoded 391 MB >= source 386 MB)
+```
+
+After the run a scorecard is printed:
+
+```
+Recompress run
+ status:            ok
+ total:             28340.1s
+ candidates:        88
+ skipped_existing:  4
+ encoded:           84   failed: 0
+ replaced:          79   kept_original: 5
+ space_saved:       8234.7 MB
+```
+
+Raw `PROGRESS|` lines are suppressed by default. Use `-VerboseConsole` to print them (useful for scripted/dispatch consumption).
+
 ## Output lines
 
-### PROGRESS (after each file)
+### PROGRESS (after each file, only with -VerboseConsole)
 
 ```
 PROGRESS|tool=vidrecompress|event=update|index=N|total=M|file=<basename>|elapsed_seconds=N|encoded=E|replaced=R|kept_original=K|encode_failed=F
@@ -82,7 +113,7 @@ PROGRESS|tool=vidrecompress|event=update|index=N|total=M|file=<basename>|elapsed
 ### SUMMARY (final line)
 
 ```
-SUMMARY|tool=vidrecompress|status=<ok|noop|failed>|dry_run=<true|false>|candidates=N|skipped_existing=N|skipped_no_space=N|encoded=N|encode_failed=N|replaced=N|kept_original=N|warnings=N
+SUMMARY|tool=vidrecompress|status=<ok|noop|failed>|dry_run=<true|false>|candidates=N|skipped_existing=N|skipped_no_space=N|encoded=N|encode_failed=N|replaced=N|kept_original=N|space_saved_mb=N|warnings=N
 ```
 
 Status values:

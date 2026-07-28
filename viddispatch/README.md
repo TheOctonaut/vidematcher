@@ -193,11 +193,14 @@ Each tool reads its own `options.json` for encoding settings (preset, extensions
 The dispatcher emits one parseable line on every handled path:
 
 ```text
-SUMMARY|tool=viddispatch|status=ok|dry_run=false|skip_pick=false|picked=N|unmatched=N|encoded=N|encode_failed=N|moved=N|move_failed=N
-SUMMARY|tool=viddispatch|status=ok|dry_run=false|skip_pick=false|picked=N|unmatched=N|encoded=N|encode_failed=N|moved=N|move_failed=N|reconcile_inspected=N|reconcile_replaced_inflated=N|reconcile_deleted_final_inflated=N|reconcile_deleted_handbrake_smaller=N|reconcile_kept_equal=N|reconcile_missing_final_match=N|reconcile_errors=N
+SUMMARY|tool=viddispatch|status=ok|dry_run=false|skip_pick=false|picked=N|unmatched=N|encoded=N|encode_failed=N|moved=N|move_failed=N|move_deferred=N|pending_moved=N|reconcile_inspected=N|reconcile_replaced_inflated=N|reconcile_deleted_final_inflated=N|reconcile_deleted_handbrake_smaller=N|reconcile_kept_equal=N|reconcile_missing_final_match=N|reconcile_errors=N
 ```
 
-Status values: `ok`, `noop`, `failed`, `aborted`
+Status values: `ok`, `noop`, `partial`, `failed`, `aborted`
+
+- `partial` — encode succeeded but some outputs could not be moved to `FinalDir` (e.g. destination full); they are held in `.videncode-ready` for the next run. Treated as success by the dispatcher; reconcile still runs.
+- `move_deferred` — count of files held in `.videncode-ready` due to insufficient space in `FinalDir`.
+- `pending_moved` — count of files flushed from `.videncode-ready` to `FinalDir` at the start of this run.
 
 ## Options File Example
 
