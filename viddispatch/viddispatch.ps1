@@ -168,6 +168,8 @@ function Show-FinalScorecard {
         [Parameter(Mandatory = $true)][int]$EncodeFailed,
         [Parameter(Mandatory = $true)][int]$Moved,
         [Parameter(Mandatory = $true)][int]$MoveFailed,
+        [Parameter(Mandatory = $false)][int]$MoveDeferred = 0,
+        [Parameter(Mandatory = $false)][int]$PendingMoved = 0,
         [Parameter(Mandatory = $true)][int]$ReconcileInspected,
         [Parameter(Mandatory = $true)][int]$ReconcileReplacedInflated,
         [Parameter(Mandatory = $true)][int]$ReconcileDeletedSmaller,
@@ -181,6 +183,9 @@ function Show-FinalScorecard {
     Write-Host ("  total:  {0}s" -f ([math]::Round($TotalSeconds, 1)))
     Write-Host ("  pick/match/encode/move: {0}/{1}/{2}/{3}" -f $Picked, $Unmatched, $Encoded, $Moved)
     Write-Host ("  encode_failed/move_failed: {0}/{1}" -f $EncodeFailed, $MoveFailed)
+    if ($MoveDeferred -gt 0 -or $PendingMoved -gt 0) {
+        Write-Host ("  move_deferred/pending_moved: {0}/{1}" -f $MoveDeferred, $PendingMoved)
+    }
     Write-Host ("  reconcile inspected/replaced/deleted_smaller/kept_equal/errors: {0}/{1}/{2}/{3}/{4}" -f $ReconcileInspected, $ReconcileReplacedInflated, $ReconcileDeletedSmaller, $ReconcileKeptEqual, $ReconcileErrors)
 }
 
@@ -732,6 +737,8 @@ $dispatchEncoded = 0
 $dispatchEncodeFailed = 0
 $dispatchMoved = 0
 $dispatchMoveFailed = 0
+$dispatchMoveDeferred = 0
+$dispatchPendingMoved = 0
 
 # ---------------------------------------------------------------------------
 # PREFLIGHT: validate encode dependencies before any destructive steps
@@ -950,7 +957,7 @@ try {
             Show-FinalScorecard -Status "aborted" -TotalSeconds $pipelineWatch.Elapsed.TotalSeconds -Picked $dispatchPickedCount -Unmatched $dispatchUnmatchedCount -Encoded $dispatchEncoded -EncodeFailed $dispatchEncodeFailed -Moved $dispatchMoved -MoveFailed $dispatchMoveFailed -ReconcileInspected 0 -ReconcileReplacedInflated 0 -ReconcileDeletedSmaller 0 -ReconcileKeptEqual 0 -ReconcileErrors 0
             Show-StepProgress -Percent 100 -Status "Aborted"
             Write-Progress -Activity "viddispatch pipeline" -Completed
-            Write-Host "SUMMARY|tool=viddispatch|status=aborted|dry_run=$dryRunFlag|skip_pick=$skipPickFlag|picked=$dispatchPickedCount|unmatched=$dispatchUnmatchedCount|encoded=$dispatchEncoded|encode_failed=$dispatchEncodeFailed|moved=$dispatchMoved|move_failed=$dispatchMoveFailed|reconcile_inspected=0|reconcile_replaced_inflated=0|reconcile_deleted_final_inflated=0|reconcile_deleted_handbrake_smaller=0|reconcile_kept_equal=0|reconcile_missing_final_match=0|reconcile_errors=0|note=user_interrupted"
+            Write-Host "SUMMARY|tool=viddispatch|status=aborted|dry_run=$dryRunFlag|skip_pick=$skipPickFlag|picked=$dispatchPickedCount|unmatched=$dispatchUnmatchedCount|encoded=$dispatchEncoded|encode_failed=$dispatchEncodeFailed|moved=$dispatchMoved|move_failed=$dispatchMoveFailed|move_deferred=$dispatchMoveDeferred|pending_moved=$dispatchPendingMoved|reconcile_inspected=0|reconcile_replaced_inflated=0|reconcile_deleted_final_inflated=0|reconcile_deleted_handbrake_smaller=0|reconcile_kept_equal=0|reconcile_missing_final_match=0|reconcile_errors=0|note=user_interrupted"
             exit 130
         }
 
@@ -965,13 +972,17 @@ try {
             if ($null -ne $v) { $dispatchMoved = [int]$v }
             $v = Get-SummaryField -Summary $encodeResult.Summary -Field "move_failed"
             if ($null -ne $v) { $dispatchMoveFailed = [int]$v }
+            $v = Get-SummaryField -Summary $encodeResult.Summary -Field "move_deferred"
+            if ($null -ne $v) { $dispatchMoveDeferred = [int]$v }
+            $v = Get-SummaryField -Summary $encodeResult.Summary -Field "pending_moved"
+            if ($null -ne $v) { $dispatchPendingMoved = [int]$v }
         }
 
         $encodeSummaryStatus = $null
         if (-not [string]::IsNullOrWhiteSpace($encodeResult.Summary)) {
             $encodeSummaryStatus = Get-SummaryField -Summary $encodeResult.Summary -Field "status"
         }
-        $encodeSucceeded = ($encodeSummaryStatus -eq "ok" -or $encodeSummaryStatus -eq "noop") -or
+        $encodeSucceeded = ($encodeSummaryStatus -eq "ok" -or $encodeSummaryStatus -eq "noop" -or $encodeSummaryStatus -eq "partial") -or
                            ($null -eq $encodeSummaryStatus -and $encodeResult.ExitCode -eq 0)
         if (-not $encodeSucceeded) {
             $encodeFailDetail = if (-not [string]::IsNullOrWhiteSpace($encodeSummaryStatus)) {
@@ -985,11 +996,14 @@ try {
             Show-FinalScorecard -Status "failed" -TotalSeconds $pipelineWatch.Elapsed.TotalSeconds -Picked $dispatchPickedCount -Unmatched $dispatchUnmatchedCount -Encoded $dispatchEncoded -EncodeFailed $dispatchEncodeFailed -Moved $dispatchMoved -MoveFailed $dispatchMoveFailed -ReconcileInspected 0 -ReconcileReplacedInflated 0 -ReconcileDeletedSmaller 0 -ReconcileKeptEqual 0 -ReconcileErrors 0
             Show-StepProgress -Percent 100 -Status "Failed"
             Write-Progress -Activity "viddispatch pipeline" -Completed
-            Write-Host "SUMMARY|tool=viddispatch|status=failed|dry_run=$dryRunFlag|skip_pick=$skipPickFlag|picked=$dispatchPickedCount|unmatched=$dispatchUnmatchedCount|encoded=$dispatchEncoded|encode_failed=$dispatchEncodeFailed|moved=$dispatchMoved|move_failed=$dispatchMoveFailed|reconcile_inspected=0|reconcile_replaced_inflated=0|reconcile_deleted_final_inflated=0|reconcile_deleted_handbrake_smaller=0|reconcile_kept_equal=0|reconcile_missing_final_match=0|reconcile_errors=0"
+            Write-Host "SUMMARY|tool=viddispatch|status=failed|dry_run=$dryRunFlag|skip_pick=$skipPickFlag|picked=$dispatchPickedCount|unmatched=$dispatchUnmatchedCount|encoded=$dispatchEncoded|encode_failed=$dispatchEncodeFailed|moved=$dispatchMoved|move_failed=$dispatchMoveFailed|move_deferred=$dispatchMoveDeferred|pending_moved=$dispatchPendingMoved|reconcile_inspected=0|reconcile_replaced_inflated=0|reconcile_deleted_final_inflated=0|reconcile_deleted_handbrake_smaller=0|reconcile_kept_equal=0|reconcile_missing_final_match=0|reconcile_errors=0"
             exit 1
         }
 
-        Show-StepResult -Step "Encode" -Result "OK" -Detail ("encoded={0} failed={1} moved={2}" -f $dispatchEncoded, $dispatchEncodeFailed, $dispatchMoved) -Seconds $encodeSeconds
+        $encodeDetail = "encoded={0} failed={1} moved={2}" -f $dispatchEncoded, $dispatchEncodeFailed, $dispatchMoved
+        if ($dispatchMoveDeferred -gt 0) { $encodeDetail += " deferred={0}" -f $dispatchMoveDeferred }
+        if ($dispatchPendingMoved -gt 0) { $encodeDetail += " pending_moved={0}" -f $dispatchPendingMoved }
+        Show-StepResult -Step "Encode" -Result "OK" -Detail $encodeDetail -Seconds $encodeSeconds
     }
 
     Show-StepProgress -Percent 75 -Status "Reconcile cleanup"
@@ -1003,7 +1017,7 @@ try {
     $reconcileSeconds = Stop-StepTimer -Timer $reconcileWatch
     Show-StepResult -Step "Reconcile" -Result "OK" -Detail ("inspected={0} replaced_inflated={1} deleted_smaller={2} kept_equal={3}" -f $reconcile.inspected, $reconcile.replaced_inflated, $reconcile.deleted_handbrake_smaller_final, $reconcile.kept_equal) -Seconds $reconcileSeconds
 
-    $didWork = ($dispatchUnmatchedCount -gt 0 -or $dispatchEncoded -gt 0 -or $dispatchMoved -gt 0 -or $reconcile.replaced_inflated -gt 0 -or $reconcile.deleted_handbrake_smaller_final -gt 0)
+    $didWork = ($dispatchUnmatchedCount -gt 0 -or $dispatchEncoded -gt 0 -or $dispatchMoved -gt 0 -or $dispatchMoveDeferred -gt 0 -or $dispatchPendingMoved -gt 0 -or $reconcile.replaced_inflated -gt 0 -or $reconcile.deleted_handbrake_smaller_final -gt 0)
     $status = if ($DryRun) {
         "noop"
     }
@@ -1017,8 +1031,8 @@ try {
     Show-StepProgress -Percent 100 -Status "Complete"
     Write-Progress -Activity "viddispatch pipeline" -Completed
     $pipelineWatch.Stop()
-    Show-FinalScorecard -Status $status -TotalSeconds $pipelineWatch.Elapsed.TotalSeconds -Picked $dispatchPickedCount -Unmatched $dispatchUnmatchedCount -Encoded $dispatchEncoded -EncodeFailed $dispatchEncodeFailed -Moved $dispatchMoved -MoveFailed $dispatchMoveFailed -ReconcileInspected $reconcile.inspected -ReconcileReplacedInflated $reconcile.replaced_inflated -ReconcileDeletedSmaller $reconcile.deleted_handbrake_smaller_final -ReconcileKeptEqual $reconcile.kept_equal -ReconcileErrors $reconcile.cleanup_errors
-    Write-Host "SUMMARY|tool=viddispatch|status=$status|dry_run=$dryRunFlag|skip_pick=$skipPickFlag|picked=$dispatchPickedCount|unmatched=$dispatchUnmatchedCount|encoded=$dispatchEncoded|encode_failed=$dispatchEncodeFailed|moved=$dispatchMoved|move_failed=$dispatchMoveFailed|reconcile_inspected=$($reconcile.inspected)|reconcile_replaced_inflated=$($reconcile.replaced_inflated)|reconcile_deleted_final_inflated=$($reconcile.deleted_final_inflated)|reconcile_deleted_handbrake_smaller=$($reconcile.deleted_handbrake_smaller_final)|reconcile_kept_equal=$($reconcile.kept_equal)|reconcile_missing_final_match=$($reconcile.missing_final_match)|reconcile_errors=$($reconcile.cleanup_errors)"
+    Show-FinalScorecard -Status $status -TotalSeconds $pipelineWatch.Elapsed.TotalSeconds -Picked $dispatchPickedCount -Unmatched $dispatchUnmatchedCount -Encoded $dispatchEncoded -EncodeFailed $dispatchEncodeFailed -Moved $dispatchMoved -MoveFailed $dispatchMoveFailed -MoveDeferred $dispatchMoveDeferred -PendingMoved $dispatchPendingMoved -ReconcileInspected $reconcile.inspected -ReconcileReplacedInflated $reconcile.replaced_inflated -ReconcileDeletedSmaller $reconcile.deleted_handbrake_smaller_final -ReconcileKeptEqual $reconcile.kept_equal -ReconcileErrors $reconcile.cleanup_errors
+    Write-Host "SUMMARY|tool=viddispatch|status=$status|dry_run=$dryRunFlag|skip_pick=$skipPickFlag|picked=$dispatchPickedCount|unmatched=$dispatchUnmatchedCount|encoded=$dispatchEncoded|encode_failed=$dispatchEncodeFailed|moved=$dispatchMoved|move_failed=$dispatchMoveFailed|move_deferred=$dispatchMoveDeferred|pending_moved=$dispatchPendingMoved|reconcile_inspected=$($reconcile.inspected)|reconcile_replaced_inflated=$($reconcile.replaced_inflated)|reconcile_deleted_final_inflated=$($reconcile.deleted_final_inflated)|reconcile_deleted_handbrake_smaller=$($reconcile.deleted_handbrake_smaller_final)|reconcile_kept_equal=$($reconcile.kept_equal)|reconcile_missing_final_match=$($reconcile.missing_final_match)|reconcile_errors=$($reconcile.cleanup_errors)"
 }
 finally {
     if (Test-Path -LiteralPath $tempCsvPath) {
