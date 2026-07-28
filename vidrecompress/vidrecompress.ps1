@@ -30,7 +30,10 @@ param(
     [switch]$DryRun,
 
     [Parameter(Mandatory = $false)]
-    [switch]$NoConfirm
+    [switch]$NoConfirm,
+
+    [Parameter(Mandatory = $false)]
+    [switch]$VerboseConsole
 )
 
 $ErrorActionPreference = "Stop"
@@ -100,6 +103,17 @@ function ConvertTo-ProgressValue {
     param([string]$Value)
     if ($null -eq $Value) { return "" }
     return (($Value -replace "\|", "/") -replace "\r?\n", " ")
+}
+
+function Format-Eta {
+    param([double]$Seconds)
+    if ($Seconds -le 0) { return "0s" }
+    $h = [math]::Floor($Seconds / 3600)
+    $m = [math]::Floor(($Seconds % 3600) / 60)
+    $s = [math]::Floor($Seconds % 60)
+    if ($h -gt 0) { return "${h}h ${m}m" }
+    if ($m -gt 0) { return "${m}m ${s}s" }
+    return "${s}s"
 }
 
 function Get-DriveFreeBytes {
@@ -327,7 +341,7 @@ Write-Host "Files found: $totalScanned  |  Already have $($resolvedOutputExtensi
 
 if ($candidateCount -eq 0) {
     Write-Host "No candidate files to recompress."
-    Write-Host ("SUMMARY|tool=vidrecompress|status=noop|dry_run={0}|candidates=0|skipped_existing={1}|skipped_no_space=0|encoded=0|encode_failed=0|replaced=0|kept_original=0|warnings={2}" -f ($(if ($DryRun) { "true" } else { "false" }), $skippedExisting, $warnings))
+    Write-Host ("SUMMARY|tool=vidrecompress|status=noop|dry_run={0}|candidates=0|skipped_existing={1}|skipped_no_space=0|encoded=0|encode_failed=0|replaced=0|kept_original=0|space_saved_mb=0|warnings={2}" -f ($(if ($DryRun) { "true" } else { "false" }), $skippedExisting, $warnings))
     exit 0
 }
 
@@ -344,7 +358,7 @@ if ($DryRun) {
         Write-Host "    then replace source if smaller"
     }
     Write-Host ""
-    Write-Host "SUMMARY|tool=vidrecompress|status=noop|dry_run=true|candidates=$candidateCount|skipped_existing=$skippedExisting|skipped_no_space=0|encoded=0|encode_failed=0|replaced=0|kept_original=0|warnings=$warnings"
+    Write-Host "SUMMARY|tool=vidrecompress|status=noop|dry_run=true|candidates=$candidateCount|skipped_existing=$skippedExisting|skipped_no_space=0|encoded=0|encode_failed=0|replaced=0|kept_original=0|space_saved_mb=0|warnings=$warnings"
     exit 0
 }
 
@@ -362,7 +376,7 @@ if (-not $NoConfirm) {
     $confirm = Read-Host "Proceed? (Y/N)"
     if ($confirm -notmatch '^[Yy]') {
         Write-Host "Aborted."
-        Write-Host "SUMMARY|tool=vidrecompress|status=aborted|dry_run=false|candidates=$candidateCount|skipped_existing=$skippedExisting|skipped_no_space=0|encoded=0|encode_failed=0|replaced=0|kept_original=0|warnings=$warnings"
+        Write-Host "SUMMARY|tool=vidrecompress|status=aborted|dry_run=false|candidates=$candidateCount|skipped_existing=$skippedExisting|skipped_no_space=0|encoded=0|encode_failed=0|replaced=0|kept_original=0|space_saved_mb=0|warnings=$warnings"
         exit 0
     }
 }
@@ -401,13 +415,18 @@ $skippedNoSpace = 0
 $sessionWatch = [System.Diagnostics.Stopwatch]::StartNew()
 $fileIndex = 0
 $currentTempFile = $null
+$fileTimings = [System.Collections.Generic.List[double]]::new()
+$fileWatch   = [System.Diagnostics.Stopwatch]::new()
+$spaceSavedBytes = [long]0
 
 try {
     foreach ($file in $candidateFiles) {
         $fileIndex++
+        $fileWatch.Restart()
         $outName = $file.BaseName + $resolvedOutputExtension
         $tempOutput = Join-Path $tempRoot $outName
         $progressFile = ConvertTo-ProgressValue -Value $file.BaseName
+        $ranHandBrake = $false
 
         # Check free space in TempDir: file * 1.2 + 100 MB headroom
         $spaceNeeded = [long]([math]::Ceiling($file.Length * 1.2)) + 104857600
@@ -415,95 +434,128 @@ try {
         if ($null -ne $freeBytes -and $freeBytes -lt $spaceNeeded) {
             Write-Warning ("Not enough space in TempDir ({0:N0} bytes free, {1:N0} needed): skipping {2}" -f $freeBytes, $spaceNeeded, $file.Name)
             $skippedNoSpace++
-            Write-Host ("PROGRESS|tool=vidrecompress|event=update|index={0}|total={1}|file={2}|elapsed_seconds={3}|encoded={4}|replaced={5}|kept_original={6}|encode_failed={7}" -f $fileIndex, $candidateCount, $progressFile, ([math]::Round($sessionWatch.Elapsed.TotalSeconds, 1)), $encoded, $replaced, $keptOriginal, $encodeFailed)
-            continue
-        }
-
-        if (Test-Path -LiteralPath $tempOutput -PathType Leaf) {
-            Remove-Item -LiteralPath $tempOutput -Force
-        }
-
-        $currentTempFile = $tempOutput
-
-        $argList = New-Object System.Collections.Generic.List[string]
-        $argList.Add("--input")
-        $argList.Add($file.FullName)
-        $argList.Add("--output")
-        $argList.Add($tempOutput)
-        if ($null -ne $resolvedPresetImportFile) {
-            $argList.Add("--preset-import-file")
-            $argList.Add($resolvedPresetImportFile)
-        }
-        $argList.Add("--preset")
-        $argList.Add($resolvedPresetName)
-
-        Write-Host "Encoding [$fileIndex/$candidateCount]: $($file.FullName)"
-
-        $argLine = ($argList | ForEach-Object { Escape-Argument -Value $_ }) -join " "
-        $stdoutPath = [System.IO.Path]::GetTempFileName()
-        $stderrPath = [System.IO.Path]::GetTempFileName()
-        $exitCode = 1
-        $stderr = ""
-
-        try {
-            $proc = Start-Process -FilePath $resolvedHandBrakeCliPath -ArgumentList $argLine -NoNewWindow -Wait -PassThru -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
-            $exitCode = $proc.ExitCode
-
-            if (Test-Path -LiteralPath $stderrPath -PathType Leaf) {
-                $stderr = Get-Content -LiteralPath $stderrPath -Raw -ErrorAction SilentlyContinue
-            }
-        }
-        finally {
-            if (Test-Path -LiteralPath $stdoutPath -PathType Leaf) {
-                Remove-Item -LiteralPath $stdoutPath -Force -ErrorAction SilentlyContinue
-            }
-            if (Test-Path -LiteralPath $stderrPath -PathType Leaf) {
-                Remove-Item -LiteralPath $stderrPath -Force -ErrorAction SilentlyContinue
-            }
-        }
-
-        if ($exitCode -ne 0 -or -not (Test-Path -LiteralPath $tempOutput -PathType Leaf)) {
-            $encodeFailed++
-            Write-Warning "HandBrakeCLI failed for '$($file.FullName)' (ExitCode: $exitCode)"
-            if (-not [string]::IsNullOrWhiteSpace($stderr)) {
-                Write-Warning ($stderr.TrimEnd() -replace "\r?\n", [Environment]::NewLine)
-            }
-            if (Test-Path -LiteralPath $tempOutput -PathType Leaf) {
-                Remove-Item -LiteralPath $tempOutput -Force -ErrorAction SilentlyContinue
-            }
-            $currentTempFile = $null
-            Write-Host ("PROGRESS|tool=vidrecompress|event=update|index={0}|total={1}|file={2}|elapsed_seconds={3}|encoded={4}|replaced={5}|kept_original={6}|encode_failed={7}" -f $fileIndex, $candidateCount, $progressFile, ([math]::Round($sessionWatch.Elapsed.TotalSeconds, 1)), $encoded, $replaced, $keptOriginal, $encodeFailed)
-            continue
-        }
-
-        $encoded++
-        $tempSize = (Get-Item -LiteralPath $tempOutput).Length
-
-        if ($tempSize -lt $file.Length) {
-            $destOutput = Join-Path $file.DirectoryName $outName
-            try {
-                Remove-Item -LiteralPath $file.FullName -Force
-                Move-Item -LiteralPath $tempOutput -Destination $destOutput -Force
-                $replaced++
-                Write-Host ("Replaced: {0} ({1:N0} -> {2:N0} bytes, saved {3:N0} bytes)" -f $file.Name, $file.Length, $tempSize, ($file.Length - $tempSize))
-            }
-            catch {
-                Write-Warning "Failed to replace source file '$($file.FullName)': $($_.Exception.Message)"
-                $warnings++
-                if (Test-Path -LiteralPath $tempOutput -PathType Leaf) {
-                    Remove-Item -LiteralPath $tempOutput -Force -ErrorAction SilentlyContinue
-                }
+            if ($VerboseConsole) {
+                Write-Host ("PROGRESS|tool=vidrecompress|event=update|index={0}|total={1}|file={2}|elapsed_seconds={3}|encoded={4}|replaced={5}|kept_original={6}|encode_failed={7}" -f $fileIndex, $candidateCount, $progressFile, ([math]::Round($sessionWatch.Elapsed.TotalSeconds, 1)), $encoded, $replaced, $keptOriginal, $encodeFailed)
             }
         }
         else {
-            Remove-Item -LiteralPath $tempOutput -Force -ErrorAction SilentlyContinue
-            $keptOriginal++
-            Write-Host ("Kept original: {0} (encoded {1:N0} bytes >= source {2:N0} bytes)" -f $file.Name, $tempSize, $file.Length)
+            if (Test-Path -LiteralPath $tempOutput -PathType Leaf) {
+                Remove-Item -LiteralPath $tempOutput -Force
+            }
+
+            $currentTempFile = $tempOutput
+
+            $argList = New-Object System.Collections.Generic.List[string]
+            $argList.Add("--input")
+            $argList.Add($file.FullName)
+            $argList.Add("--output")
+            $argList.Add($tempOutput)
+            if ($null -ne $resolvedPresetImportFile) {
+                $argList.Add("--preset-import-file")
+                $argList.Add($resolvedPresetImportFile)
+            }
+            $argList.Add("--preset")
+            $argList.Add($resolvedPresetName)
+
+            Write-Host "Encoding [$fileIndex/$candidateCount]: $($file.FullName)"
+
+            $argLine = ($argList | ForEach-Object { Escape-Argument -Value $_ }) -join " "
+            $stdoutPath = [System.IO.Path]::GetTempFileName()
+            $stderrPath = [System.IO.Path]::GetTempFileName()
+            $exitCode = 1
+            $stderr = ""
+
+            try {
+                $proc = Start-Process -FilePath $resolvedHandBrakeCliPath -ArgumentList $argLine -NoNewWindow -Wait -PassThru -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
+                $exitCode = $proc.ExitCode
+
+                if (Test-Path -LiteralPath $stderrPath -PathType Leaf) {
+                    $stderr = Get-Content -LiteralPath $stderrPath -Raw -ErrorAction SilentlyContinue
+                }
+            }
+            finally {
+                if (Test-Path -LiteralPath $stdoutPath -PathType Leaf) {
+                    Remove-Item -LiteralPath $stdoutPath -Force -ErrorAction SilentlyContinue
+                }
+                if (Test-Path -LiteralPath $stderrPath -PathType Leaf) {
+                    Remove-Item -LiteralPath $stderrPath -Force -ErrorAction SilentlyContinue
+                }
+            }
+
+            $ranHandBrake = $true
+
+            if ($exitCode -ne 0 -or -not (Test-Path -LiteralPath $tempOutput -PathType Leaf)) {
+                $encodeFailed++
+                Write-Warning "HandBrakeCLI failed for '$($file.FullName)' (ExitCode: $exitCode)"
+                if (-not [string]::IsNullOrWhiteSpace($stderr)) {
+                    Write-Warning ($stderr.TrimEnd() -replace "\r?\n", [Environment]::NewLine)
+                }
+                if (Test-Path -LiteralPath $tempOutput -PathType Leaf) {
+                    Remove-Item -LiteralPath $tempOutput -Force -ErrorAction SilentlyContinue
+                }
+                $currentTempFile = $null
+                if ($VerboseConsole) {
+                    Write-Host ("PROGRESS|tool=vidrecompress|event=update|index={0}|total={1}|file={2}|elapsed_seconds={3}|encoded={4}|replaced={5}|kept_original={6}|encode_failed={7}" -f $fileIndex, $candidateCount, $progressFile, ([math]::Round($sessionWatch.Elapsed.TotalSeconds, 1)), $encoded, $replaced, $keptOriginal, $encodeFailed)
+                }
+            }
+            else {
+                $encoded++
+                $tempSize = (Get-Item -LiteralPath $tempOutput).Length
+
+                if ($tempSize -lt $file.Length) {
+                    $destOutput = Join-Path $file.DirectoryName $outName
+                    try {
+                        Remove-Item -LiteralPath $file.FullName -Force
+                        Move-Item -LiteralPath $tempOutput -Destination $destOutput -Force
+                        $replaced++
+                        $spaceSavedBytes += ($file.Length - $tempSize)
+                        Write-Host ("Replaced: {0} ({1:N0} -> {2:N0} bytes, saved {3:N0} bytes)" -f $file.Name, $file.Length, $tempSize, ($file.Length - $tempSize))
+                    }
+                    catch {
+                        Write-Warning "Failed to replace source file '$($file.FullName)': $($_.Exception.Message)"
+                        $warnings++
+                        if (Test-Path -LiteralPath $tempOutput -PathType Leaf) {
+                            Remove-Item -LiteralPath $tempOutput -Force -ErrorAction SilentlyContinue
+                        }
+                    }
+                }
+                else {
+                    Remove-Item -LiteralPath $tempOutput -Force -ErrorAction SilentlyContinue
+                    $keptOriginal++
+                    Write-Host ("Kept original: {0} (encoded {1:N0} bytes >= source {2:N0} bytes)" -f $file.Name, $tempSize, $file.Length)
+                }
+
+                $currentTempFile = $null
+
+                if ($VerboseConsole) {
+                    Write-Host ("PROGRESS|tool=vidrecompress|event=update|index={0}|total={1}|file={2}|elapsed_seconds={3}|encoded={4}|replaced={5}|kept_original={6}|encode_failed={7}" -f $fileIndex, $candidateCount, $progressFile, ([math]::Round($sessionWatch.Elapsed.TotalSeconds, 1)), $encoded, $replaced, $keptOriginal, $encodeFailed)
+                }
+            }
         }
 
-        $currentTempFile = $null
+        if ($ranHandBrake) {
+            $fileTimings.Add($fileWatch.Elapsed.TotalSeconds)
+        }
 
-        Write-Host ("PROGRESS|tool=vidrecompress|event=update|index={0}|total={1}|file={2}|elapsed_seconds={3}|encoded={4}|replaced={5}|kept_original={6}|encode_failed={7}" -f $fileIndex, $candidateCount, $progressFile, ([math]::Round($sessionWatch.Elapsed.TotalSeconds, 1)), $encoded, $replaced, $keptOriginal, $encodeFailed)
+        $etaStr = "estimating..."
+        if ($fileTimings.Count -gt 0) {
+            $avgSeconds = ($fileTimings | Measure-Object -Sum).Sum / $fileTimings.Count
+            $remaining  = $candidateCount - $fileIndex
+            if ($remaining -gt 0) {
+                $etaStr = Format-Eta -Seconds ($avgSeconds * $remaining)
+            }
+            else {
+                $etaStr = $null
+            }
+        }
+        $progressStatus = if ($null -ne $etaStr) {
+            "$fileIndex/$candidateCount | $($file.BaseName) | ETA $etaStr"
+        }
+        else {
+            "$fileIndex/$candidateCount | $($file.BaseName)"
+        }
+        $pct = [math]::Min(100, [math]::Round(($fileIndex / $candidateCount) * 100))
+        Write-Progress -Activity "vidrecompress" -Status $progressStatus -PercentComplete $pct
     }
 }
 finally {
@@ -512,6 +564,8 @@ finally {
         Write-Host "Cleaned up partial temp file: $currentTempFile"
     }
 }
+
+Write-Progress -Activity "vidrecompress" -Completed
 
 $sessionWatch.Stop()
 
@@ -525,9 +579,26 @@ else {
     "ok"
 }
 
+$totalSecs = [math]::Round($sessionWatch.Elapsed.TotalSeconds, 1)
+$savedMb   = [math]::Round($spaceSavedBytes / 1MB, 1)
+
 Write-Host ""
-Write-Host "Done."
-Write-Host ("SUMMARY|tool=vidrecompress|status={0}|dry_run=false|candidates={1}|skipped_existing={2}|skipped_no_space={3}|encoded={4}|encode_failed={5}|replaced={6}|kept_original={7}|warnings={8}" -f $status, $candidateCount, $skippedExisting, $skippedNoSpace, $encoded, $encodeFailed, $replaced, $keptOriginal, $warnings)
+Write-Host "Recompress run"
+Write-Host (" status:            {0}" -f $status)
+Write-Host (" total:             {0}s" -f $totalSecs)
+Write-Host (" candidates:        {0}" -f $candidateCount)
+Write-Host (" skipped_existing:  {0}" -f $skippedExisting)
+Write-Host (" encoded:           {0}  failed: {1}" -f $encoded, $encodeFailed)
+Write-Host (" replaced:          {0}  kept_original: {1}" -f $replaced, $keptOriginal)
+Write-Host (" space_saved:       {0} MB" -f $savedMb)
+if ($skippedNoSpace -gt 0) {
+    Write-Host (" skipped_no_space:  {0}" -f $skippedNoSpace)
+}
+if ($warnings -gt 0) {
+    Write-Host (" warnings:          {0}" -f $warnings)
+}
+Write-Host ""
+Write-Host ("SUMMARY|tool=vidrecompress|status={0}|dry_run=false|candidates={1}|skipped_existing={2}|skipped_no_space={3}|encoded={4}|encode_failed={5}|replaced={6}|kept_original={7}|space_saved_mb={8}|warnings={9}" -f $status, $candidateCount, $skippedExisting, $skippedNoSpace, $encoded, $encodeFailed, $replaced, $keptOriginal, ([math]::Round($spaceSavedBytes / 1MB, 1)), $warnings)
 
 if ($status -eq "failed") {
     exit 1
