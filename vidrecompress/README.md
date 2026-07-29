@@ -8,10 +8,10 @@ This is an in-place recompression workflow — not the normal collect → pick �
 
 ```powershell
 # PS7 (recommended)
-.\vidrecompress.ps7.ps1 -SourceDir "Z:\" -TempDir "C:\encode-temp" -PresetName "My Preset"
+.\vidrecompress.ps7.ps1 -SourceDir "C:\path\to\library" -TempDir "C:\path\to\temp-encode" -PresetName "My Preset"
 
 # PS5
-.\vidrecompress.ps1 -SourceDir "Z:\" -TempDir "C:\encode-temp" -PresetName "My Preset"
+.\vidrecompress.ps1 -SourceDir "C:\path\to\library" -TempDir "C:\path\to\temp-encode" -PresetName "My Preset"
 
 # Dry run (preview only, no changes)
 .\vidrecompress.ps7.ps1 -DryRun
@@ -50,7 +50,7 @@ Config precedence: CLI arguments > `options.json` > script defaults.
 
 ```json
 {
-  "SourceDir": "Z:/",
+  "SourceDir": "C:/path/to/library",
   "TempDir": "C:/path/to/temp-encode",
   "PresetName": "My Custom Preset",
   "PresetImportFile": "C:/path/to/custom-presets.json",
@@ -77,13 +77,13 @@ Config precedence: CLI arguments > `options.json` > script defaults.
 During the run a `Write-Progress` bar shows the current file, position, and ETA:
 
 ```
-vidrecompress [12/88 | PureTaboo.23.11.07.Madi.Collins... | ETA 6h 12m]
+vidrecompress [12/88 | ExampleVideo_001... | ETA 6h 12m]
 ```
 
 Each completed file prints one result line with per-file saved size and running session total:
 
 ```
-Replaced: PureTaboo.23.11.07.Madi.Collins.XXX.XviD-iPT Team.avi (382 MB -> 297 MB, saved 85.0 MB; total saved 1.3 GB)
+Replaced: ExampleVideo_001.avi (382 MB -> 297 MB, saved 85.0 MB; total saved 1.3 GB)
 Kept original: SomeFile.avi (encoded 391 MB >= source 386 MB)
 ```
 
@@ -113,13 +113,15 @@ PROGRESS|tool=vidrecompress|event=update|index=N|total=M|file=<basename>|elapsed
 ### SUMMARY (final line)
 
 ```
-SUMMARY|tool=vidrecompress|status=<ok|noop|failed>|dry_run=<true|false>|candidates=N|skipped_existing=N|skipped_no_space=N|encoded=N|encode_failed=N|replaced=N|kept_original=N|space_saved_mb=N|warnings=N
+SUMMARY|tool=vidrecompress|status=<ok|noop|failed|stopped|interrupted>|dry_run=<true|false>|candidates=N|skipped_existing=N|skipped_no_space=N|encoded=N|encode_failed=N|replaced=N|kept_original=N|space_saved_mb=N|warnings=N
 ```
 
 Status values:
 - `ok` — completed (includes `kept_original > 0`, which is expected behaviour)
 - `noop` — no candidates found or all skipped
 - `failed` — at least one encode failed
+- `stopped` — stop sentinel requested a clean stop between files
+- `interrupted` — externally interrupted (for example Ctrl+C)
 - `aborted` — user declined confirmation prompt
 
 ## Exit codes
