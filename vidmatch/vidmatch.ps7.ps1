@@ -34,7 +34,8 @@ if ([string]::IsNullOrWhiteSpace($scriptRoot)) {
     $scriptRoot = (Get-Location).Path
 }
 
-if ([string]::IsNullOrWhiteSpace($OptionsFile)) {
+$optionsFileExplicit = -not [string]::IsNullOrWhiteSpace($OptionsFile)
+if (-not $optionsFileExplicit) {
     $OptionsFile = Join-Path $scriptRoot "options.json"
 }
 
@@ -148,31 +149,39 @@ $defaults = [PSCustomObject]@{
 $exampleOptionsFile = Join-Path $scriptRoot $exampleOptionsFileName
 
 if (-not (Test-Path -LiteralPath $OptionsFile -PathType Leaf)) {
-    Write-Host "Options file not found: $OptionsFile"
-    $response = Read-Host "Create it now? (Y/N)"
-
-    if ($response -match '^[Yy]') {
-        if (Test-Path -LiteralPath $exampleOptionsFile -PathType Leaf) {
-            Copy-Item -LiteralPath $exampleOptionsFile -Destination $OptionsFile -Force
-            Write-Host "Created options file from template: $OptionsFile"
-        }
-        else {
-            $defaultOptions = [ordered]@{
-                SourceDir = $null
-                TargetDir = $null
-                Recurse = $defaults.Recurse
-                ShowRelativePaths = $defaults.ShowRelativePaths
-                CsvOutputPath = $defaults.CsvOutputPath
-                SourceExtensions = $defaults.SourceExtensions
-                TargetExtensions = $defaults.TargetExtensions
-            }
-
-            $defaultOptions | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $OptionsFile -Encoding UTF8
-            Write-Host "Created options file with default values: $OptionsFile"
-        }
+    if ($NoConfirm -and -not $optionsFileExplicit) {
+        Write-Host "Options file not found: $OptionsFile (continuing without it)"
+    }
+    elseif ($optionsFileExplicit) {
+        throw "Options file not found: $OptionsFile"
     }
     else {
-        Write-Host "Continuing without options file."
+        Write-Host "Options file not found: $OptionsFile"
+        $response = Read-Host "Create it now? (Y/N)"
+
+        if ($response -match '^[Yy]') {
+            if (Test-Path -LiteralPath $exampleOptionsFile -PathType Leaf) {
+                Copy-Item -LiteralPath $exampleOptionsFile -Destination $OptionsFile -Force
+                Write-Host "Created options file from template: $OptionsFile"
+            }
+            else {
+                $defaultOptions = [ordered]@{
+                    SourceDir = $null
+                    TargetDir = $null
+                    Recurse = $defaults.Recurse
+                    ShowRelativePaths = $defaults.ShowRelativePaths
+                    CsvOutputPath = $defaults.CsvOutputPath
+                    SourceExtensions = $defaults.SourceExtensions
+                    TargetExtensions = $defaults.TargetExtensions
+                }
+
+                $defaultOptions | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $OptionsFile -Encoding UTF8
+                Write-Host "Created options file with default values: $OptionsFile"
+            }
+        }
+        else {
+            Write-Host "Continuing without options file."
+        }
     }
 }
 

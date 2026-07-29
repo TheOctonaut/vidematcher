@@ -45,6 +45,20 @@ Use this to batch-encode a staging folder without re-processing already-complete
 
 ---
 
+### [vidrecompress](vidrecompress/)
+
+Re-encodes existing `.avi` files in-place using HandBrakeCLI, replacing each source file with the encoded `.mp4` only if the result is smaller. Files that already have a matching `.mp4` are skipped.
+
+Use this to shrink a library of raw recordings without a separate destination folder.
+
+- Dry run mode for safe previewing
+- Confirmation prompt before any destructive action
+- Cleans up partial temp files on error or interruption
+
+→ See [vidrecompress/README.md](vidrecompress/README.md)
+
+---
+
 ### [viddispatch](viddispatch/)
 
 Runs the full pipeline in one command: picks files from staging, checks which ones haven't been encoded yet, and encodes them.

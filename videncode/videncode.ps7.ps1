@@ -46,7 +46,8 @@ if ([string]::IsNullOrWhiteSpace($scriptRoot)) {
     $scriptRoot = (Get-Location).Path
 }
 
-if ([string]::IsNullOrWhiteSpace($OptionsFile)) {
+$optionsFileExplicit = -not [string]::IsNullOrWhiteSpace($OptionsFile)
+if (-not $optionsFileExplicit) {
     $OptionsFile = Join-Path $scriptRoot "options.json"
 }
 
@@ -127,6 +128,16 @@ function ConvertTo-ProgressValue {
     return (($Value -replace "\|", "/") -replace "\r?\n", " ")
 }
 
+function Get-DriveFreeBytes {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    try {
+        $root = [System.IO.Path]::GetPathRoot($Path)
+        if ([string]::IsNullOrWhiteSpace($root)) { return $null }
+        return ([System.IO.DriveInfo]::new($root)).AvailableFreeSpace
+    }
+    catch { return $null }
+}
+
 $defaults = [PSCustomObject]@{
     HandBrakeCliPath = "HandBrakeCLI"
     OutputExtension  = ".mp4"
@@ -134,30 +145,38 @@ $defaults = [PSCustomObject]@{
 }
 
 if (-not (Test-Path -LiteralPath $OptionsFile -PathType Leaf)) {
-    Write-Host "Options file not found: $OptionsFile"
-    $response = Read-Host "Create it now? (Y/N)"
-
-    if ($response -match '^[Yy]') {
-        if (Test-Path -LiteralPath $exampleOptionsFile -PathType Leaf) {
-            Copy-Item -LiteralPath $exampleOptionsFile -Destination $OptionsFile -Force
-            Write-Host "Created options file from template: $OptionsFile"
-        }
-        else {
-            $defaultOptions = [ordered]@{
-                SourceDir        = "C:/path/to/handbrake-input"
-                DestDir          = "C:/path/to/final-destination"
-                PresetName       = "My Custom Preset"
-                PresetImportFile = "C:/path/to/custom-presets.json"
-                HandBrakeCliPath = $defaults.HandBrakeCliPath
-                OutputExtension  = $defaults.OutputExtension
-                SourceExtensions = $defaults.SourceExtensions
-            }
-            $defaultOptions | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $OptionsFile -Encoding UTF8
-            Write-Host "Created options file with default values: $OptionsFile"
-        }
+    if ($NoConfirm -and -not $optionsFileExplicit) {
+        Write-Host "Options file not found: $OptionsFile (continuing without it)"
+    }
+    elseif ($optionsFileExplicit) {
+        throw "Options file not found: $OptionsFile"
     }
     else {
-        Write-Host "Continuing without options file."
+        Write-Host "Options file not found: $OptionsFile"
+        $response = Read-Host "Create it now? (Y/N)"
+
+        if ($response -match '^[Yy]') {
+            if (Test-Path -LiteralPath $exampleOptionsFile -PathType Leaf) {
+                Copy-Item -LiteralPath $exampleOptionsFile -Destination $OptionsFile -Force
+                Write-Host "Created options file from template: $OptionsFile"
+            }
+            else {
+                $defaultOptions = [ordered]@{
+                    SourceDir        = "C:/path/to/handbrake-input"
+                    DestDir          = "C:/path/to/final-destination"
+                    PresetName       = "My Custom Preset"
+                    PresetImportFile = "C:/path/to/custom-presets.json"
+                    HandBrakeCliPath = $defaults.HandBrakeCliPath
+                    OutputExtension  = $defaults.OutputExtension
+                    SourceExtensions = $defaults.SourceExtensions
+                }
+                $defaultOptions | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $OptionsFile -Encoding UTF8
+                Write-Host "Created options file with default values: $OptionsFile"
+            }
+        }
+        else {
+            Write-Host "Continuing without options file."
+        }
     }
 }
 
@@ -243,6 +262,8 @@ if (-not (Test-Path -LiteralPath $resolvedSourceDir -PathType Container)) {
 }
 
 $sourceRoot = (Resolve-Path -LiteralPath $resolvedSourceDir).Path
+$tempOutDir  = Join-Path $sourceRoot ".videncode-temp"
+$readyDir    = Join-Path $sourceRoot ".videncode-ready"
 $destResolved = Resolve-Path -LiteralPath $resolvedDestDir -ErrorAction SilentlyContinue
 $destRoot = if ($null -ne $destResolved) { $destResolved.Path } else { $null }
 
@@ -291,6 +312,14 @@ foreach ($file in $destFiles) {
 $extensionSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
 foreach ($ext in $resolvedSourceExtensions) {
     [void]$extensionSet.Add($ext)
+}
+
+$readyBaseNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+if (Test-Path -LiteralPath $readyDir -PathType Container) {
+    foreach ($rf in (Get-ChildItem -LiteralPath $readyDir -File -ErrorAction SilentlyContinue)) {
+        $rn = Get-NormalizedBaseName -Name $rf.BaseName
+        if ($null -ne $rn) { [void]$readyBaseNames.Add($rn) }
+    }
 }
 
 $candidateFiles = New-Object System.Collections.Generic.List[System.IO.FileInfo]
@@ -342,7 +371,8 @@ if ($inputItems.Count -gt 0) {
 else {
     Write-Host "Scanning source folder: $sourceRoot"
     $scanned = Get-ChildItem -LiteralPath $sourceRoot -File -Recurse |
-        Where-Object { $extensionSet.Contains(($_.Extension).ToLowerInvariant()) }
+        Where-Object { $extensionSet.Contains(($_.Extension).ToLowerInvariant()) -and
+                       $_.DirectoryName -ne $tempOutDir -and $_.DirectoryName -ne $readyDir }
 
     foreach ($file in $scanned) {
         $candidateFiles.Add($file)
@@ -358,6 +388,7 @@ if ($candidateFiles.Count -eq 0) {
 $selected = New-Object System.Collections.Generic.List[System.IO.FileInfo]
 $skippedExisting = 0
 $skippedConflicts = 0
+$skippedReady = 0
 $plannedOutputNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
 
 foreach ($file in $candidateFiles) {
@@ -365,6 +396,11 @@ foreach ($file in $candidateFiles) {
     if ($null -eq $normalizedBase) {
         Write-Warning "Skipping file with empty basename: $($file.FullName)"
         $candidateWarnings++
+        continue
+    }
+
+    if ($readyBaseNames.Contains($normalizedBase)) {
+        $skippedReady++
         continue
     }
 
@@ -384,9 +420,9 @@ foreach ($file in $candidateFiles) {
     $selected.Add($file)
 }
 
-if ($selected.Count -eq 0) {
+if ($selected.Count -eq 0 -and $readyBaseNames.Count -eq 0) {
     Write-Host "No files selected after filtering destination matches/conflicts."
-    Write-Host ("SUMMARY|tool=videncode|status=noop|dry_run={0}|candidates={1}|selected=0|encoded=0|encode_failed=0|moved=0|move_failed=0|skipped_existing={2}|skipped_conflicts={3}|warnings={4}" -f ($(if ($DryRun) { "true" } else { "false" }), $candidateFiles.Count, $skippedExisting, $skippedConflicts, $candidateWarnings))
+    Write-Host ("SUMMARY|tool=videncode|status=noop|dry_run={0}|candidates={1}|selected=0|encoded=0|encode_failed=0|moved=0|move_failed=0|move_deferred=0|pending_moved=0|skipped_existing={2}|skipped_conflicts={3}|skipped_ready=0|warnings={4}" -f ($(if ($DryRun) { "true" } else { "false" }), $candidateFiles.Count, $skippedExisting, $skippedConflicts, $candidateWarnings))
     exit 0
 }
 
@@ -399,20 +435,33 @@ if ($null -ne $resolvedPresetImportFile) {
 Write-Host "Selected files: $($selected.Count)"
 Write-Host "Skipped existing matches in destination: $skippedExisting"
 Write-Host "Skipped output-name conflicts: $skippedConflicts"
-
-$tempOutDir = Join-Path $sourceRoot ".videncode-temp"
+if ($skippedReady -gt 0) {
+    Write-Host "Skipped (already encoded, pending move): $skippedReady"
+}
+if ($readyBaseNames.Count -gt 0) {
+    Write-Host "Pending encoded files ready to move: $($readyBaseNames.Count)"
+}
 
 if ($DryRun) {
     Write-Host ""
-    Write-Host "[DRY RUN] Planned encodes:"
-    foreach ($file in $selected) {
-        $tempOutput = Join-Path $tempOutDir ($file.BaseName + $resolvedOutputExtension)
-        $destOutput = Join-Path $destRoot ($file.BaseName + $resolvedOutputExtension)
-        Write-Host "  $($file.FullName)"
-        Write-Host "    -> encode temp: $tempOutput"
-        Write-Host "    -> move to:    $destOutput"
+    if ($readyBaseNames.Count -gt 0) {
+        Write-Host "[DRY RUN] Pending encoded files to move to destination:"
+        foreach ($pf in (Get-ChildItem -LiteralPath $readyDir -File -ErrorAction SilentlyContinue)) {
+            Write-Host "  $($pf.FullName)"
+            Write-Host "    -> move to: $(Join-Path $destRoot $pf.Name)"
+        }
     }
-    Write-Host "SUMMARY|tool=videncode|status=noop|dry_run=true|candidates=$($candidateFiles.Count)|selected=$($selected.Count)|encoded=0|encode_failed=0|moved=0|move_failed=0|skipped_existing=$skippedExisting|skipped_conflicts=$skippedConflicts|warnings=$candidateWarnings"
+    if ($selected.Count -gt 0) {
+        Write-Host "[DRY RUN] Planned encodes:"
+        foreach ($file in $selected) {
+            $tempOutput = Join-Path $tempOutDir ($file.BaseName + $resolvedOutputExtension)
+            $destOutput = Join-Path $destRoot ($file.BaseName + $resolvedOutputExtension)
+            Write-Host "  $($file.FullName)"
+            Write-Host "    -> encode temp: $tempOutput"
+            Write-Host "    -> move to:    $destOutput"
+        }
+    }
+    Write-Host "SUMMARY|tool=videncode|status=noop|dry_run=true|candidates=$($candidateFiles.Count)|selected=$($selected.Count)|encoded=0|encode_failed=0|moved=0|move_failed=0|move_deferred=0|pending_moved=0|skipped_existing=$skippedExisting|skipped_conflicts=$skippedConflicts|skipped_ready=$skippedReady|warnings=$candidateWarnings"
     exit 0
 }
 
@@ -421,7 +470,7 @@ if (-not $NoConfirm) {
     $confirm = Read-Host "Proceed? (Y/N)"
     if ($confirm -notmatch '^[Yy]') {
         Write-Host "Aborted."
-        Write-Host "SUMMARY|tool=videncode|status=aborted|dry_run=false|candidates=$($candidateFiles.Count)|selected=$($selected.Count)|encoded=0|encode_failed=0|moved=0|move_failed=0|skipped_existing=$skippedExisting|skipped_conflicts=$skippedConflicts|warnings=$candidateWarnings"
+        Write-Host "SUMMARY|tool=videncode|status=aborted|dry_run=false|candidates=$($candidateFiles.Count)|selected=$($selected.Count)|encoded=0|encode_failed=0|moved=0|move_failed=0|move_deferred=0|pending_moved=0|skipped_existing=$skippedExisting|skipped_conflicts=$skippedConflicts|skipped_ready=$skippedReady|warnings=$candidateWarnings"
         exit 0
     }
 }
@@ -430,10 +479,45 @@ if (-not (Test-Path -LiteralPath $tempOutDir -PathType Container)) {
     New-Item -ItemType Directory -Path $tempOutDir -Force | Out-Null
 }
 
+# ---------------------------------------------------------------------------
+# Flush previously encoded files from .videncode-ready to destination
+# ---------------------------------------------------------------------------
+$pendingMoved = 0
+if (Test-Path -LiteralPath $readyDir -PathType Container) {
+    $pendingFiles = @(Get-ChildItem -LiteralPath $readyDir -File -ErrorAction SilentlyContinue)
+    foreach ($pf in $pendingFiles) {
+        $pBase = Get-NormalizedBaseName -Name $pf.BaseName
+        if ($destBaseNames.Contains($pBase)) {
+            Write-Host "Removing ready file already present at destination: $($pf.Name)"
+            Remove-Item -LiteralPath $pf.FullName -Force -ErrorAction SilentlyContinue
+            continue
+        }
+        $pDest = Join-Path $destRoot $pf.Name
+        $freeBytes = Get-DriveFreeBytes -Path $destRoot
+        if ($null -ne $freeBytes -and $freeBytes -lt ($pf.Length + 104857600)) {
+            Write-Host ("Destination drive full ({0:N0} bytes free), skipping pending move: {1}" -f $freeBytes, $pf.Name)
+            continue
+        }
+        try {
+            Move-Item -LiteralPath $pf.FullName -Destination $pDest -Force
+            $pendingMoved++
+            Write-Host "Moved pending encoded file to destination: $pDest"
+            [void]$destBaseNames.Add($pBase)
+        }
+        catch {
+            Write-Warning "Failed to move pending file '$($pf.Name)': $($_.Exception.Message)"
+        }
+    }
+    if ($pendingMoved -gt 0) {
+        Write-Host "Flushed $pendingMoved pending encoded file(s) to destination."
+    }
+}
+
 $encoded = 0
 $encodeFailed = 0
 $moved = 0
 $moveFailed = 0
+$moveDeferred = 0
 $encodeSessionWatch = [System.Diagnostics.Stopwatch]::StartNew()
 $selectedTotal = $selected.Count
 $fileIndex = 0
@@ -503,14 +587,46 @@ foreach ($file in $selected) {
 
     $encoded++
 
-    try {
-        Move-Item -LiteralPath $tempOutput -Destination $destOutput -Force
-        $moved++
-        Write-Host "Moved output to: $destOutput"
+    $encodedSize = (Get-Item -LiteralPath $tempOutput).Length
+    $freeBytes = Get-DriveFreeBytes -Path $destRoot
+    $destHasSpace = $null -eq $freeBytes -or $freeBytes -ge ($encodedSize + 104857600)
+
+    if ($destHasSpace) {
+        try {
+            Move-Item -LiteralPath $tempOutput -Destination $destOutput -Force
+            $moved++
+            Write-Host "Moved output to: $destOutput"
+        }
+        catch {
+            Write-Warning "Failed to move encoded output to destination: $($_.Exception.Message)"
+            if (-not (Test-Path -LiteralPath $readyDir -PathType Container)) {
+                New-Item -ItemType Directory -Path $readyDir -Force | Out-Null
+            }
+            try {
+                Move-Item -LiteralPath $tempOutput -Destination (Join-Path $readyDir $outName) -Force
+                $moveDeferred++
+                Write-Host "Saved encoded output to ready folder: $outName"
+            }
+            catch {
+                $moveFailed++
+                Write-Warning "Failed to save to ready folder: $($_.Exception.Message)"
+            }
+        }
     }
-    catch {
-        $moveFailed++
-        Write-Warning "Failed to move encoded output to destination: $($_.Exception.Message)"
+    else {
+        Write-Host ("Destination drive full ({0:N0} bytes free, {1:N0} needed), deferring: {2}" -f $freeBytes, $encodedSize, $outName)
+        if (-not (Test-Path -LiteralPath $readyDir -PathType Container)) {
+            New-Item -ItemType Directory -Path $readyDir -Force | Out-Null
+        }
+        try {
+            Move-Item -LiteralPath $tempOutput -Destination (Join-Path $readyDir $outName) -Force
+            $moveDeferred++
+            Write-Host "Saved encoded output to ready folder: $outName"
+        }
+        catch {
+            $moveFailed++
+            Write-Warning "Failed to save to ready folder: $($_.Exception.Message)"
+        }
     }
 
     Write-Host ("PROGRESS|tool=videncode|event=update|index={0}|total={1}|file={2}|encoded={3}|encode_failed={4}|moved={5}|move_failed={6}|elapsed_seconds={7}" -f $fileIndex, $selectedTotal, $progressFile, $encoded, $encodeFailed, $moved, $moveFailed, ([math]::Round($encodeSessionWatch.Elapsed.TotalSeconds, 1)))
@@ -519,11 +635,11 @@ foreach ($file in $selected) {
 $encodeSessionWatch.Stop()
 Write-Host ("PROGRESS|tool=videncode|event=complete|index={0}|total={1}|encoded={2}|encode_failed={3}|moved={4}|move_failed={5}|elapsed_seconds={6}" -f $selectedTotal, $selectedTotal, $encoded, $encodeFailed, $moved, $moveFailed, ([math]::Round($encodeSessionWatch.Elapsed.TotalSeconds, 1)))
 
-$status = if ($encodeFailed -gt 0 -or $moveFailed -gt 0) { "failed" } else { "ok" }
+$status = if ($encodeFailed -gt 0 -or $moveFailed -gt 0) { "failed" } elseif ($moveDeferred -gt 0) { "partial" } else { "ok" }
 
 Write-Host ""
 Write-Host "Done."
-Write-Host "SUMMARY|tool=videncode|status=$status|dry_run=false|candidates=$($candidateFiles.Count)|selected=$($selected.Count)|encoded=$encoded|encode_failed=$encodeFailed|moved=$moved|move_failed=$moveFailed|skipped_existing=$skippedExisting|skipped_conflicts=$skippedConflicts|warnings=$candidateWarnings"
+Write-Host "SUMMARY|tool=videncode|status=$status|dry_run=false|candidates=$($candidateFiles.Count)|selected=$($selected.Count)|encoded=$encoded|encode_failed=$encodeFailed|moved=$moved|move_failed=$moveFailed|move_deferred=$moveDeferred|pending_moved=$pendingMoved|skipped_existing=$skippedExisting|skipped_conflicts=$skippedConflicts|skipped_ready=$skippedReady|warnings=$candidateWarnings"
 
 if ($status -eq "failed") {
     exit 1

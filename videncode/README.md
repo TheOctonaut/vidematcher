@@ -16,13 +16,27 @@ Encode video files using HandBrakeCLI with a specified preset, skipping files th
 ## How It Works
 
 1. Scans `DestDir` for existing files (by basename, ignoring extension).
-2. Scans `SourceDir` (or uses an explicit `InputFiles` list) for candidate files matching `SourceExtensions`.
-3. Any candidate whose basename already exists in `DestDir` is skipped.
-4. Remaining files are encoded one by one using HandBrakeCLI with the configured preset.
-5. Successfully encoded files are moved to `DestDir`.
-6. Source files are never deleted by videncode, whether encoding succeeds or fails. The original file remains in `SourceDir` after the run.
+2. Flushes any files in the `.videncode-ready` holding folder to `DestDir` if there is enough free space (see full-disk handling below).
+3. Scans `SourceDir` (or uses an explicit `InputFiles` list) for candidate files matching `SourceExtensions`.
+4. Any candidate whose basename already exists in `DestDir` or in `.videncode-ready` is skipped.
+5. Remaining files are encoded one by one using HandBrakeCLI with the configured preset.
+6. After each encode, a pre-flight space check decides where the output goes:
+   - Enough space in `DestDir` → move directly to `DestDir`.
+   - Not enough space → move to `.videncode-ready` (deferred for the next run).
+7. Source files are never deleted by videncode.
 
-Encoded files are temporarily written to a `.videncode-temp` folder inside `SourceDir` and moved to `DestDir` on success, so partial outputs never land in the destination.
+Encoded files are temporarily written to a `.videncode-temp` folder inside `SourceDir`. They are moved out of temp (to `DestDir` or `.videncode-ready`) only on success, so partial outputs never land in either location.
+
+### Full-disk handling
+
+When `DestDir` is full or nearly full, videncode continues encoding rather than stopping. Each encoded output is space-checked before the move:
+
+- If `DestDir` has at least `encodedSize + 100 MB` free, the file is moved there normally.
+- Otherwise it is placed in `.videncode-ready` (a holding folder inside `SourceDir`). The source file is kept and skipped on future runs until the held file is flushed.
+
+At the start of every run, videncode attempts to flush any pending `.videncode-ready` files to `DestDir` before encoding new files. Once the destination has space again, the next run automatically clears the backlog.
+
+This means a run that could not move all files still exits with status `partial` (not `failed`) and continues to reconcile.
 
 ## Configuration Priority
 
@@ -62,7 +76,7 @@ Required:
 | `-OutputExtension` | string | Extension for encoded output files (default: `.mp4`) |
 | `-SourceExtensions` | string[] | Extensions to include when scanning SourceDir |
 | `-DryRun` | switch | Preview what would be encoded without running anything |
-| `-NoConfirm` | switch | Skip the confirmation prompt |
+| `-NoConfirm` | switch | Skip the confirmation prompt (also skips the options file creation prompt when the default options file is missing) |
 
 ## Common Command Line Usage
 
@@ -124,8 +138,10 @@ Required:
 ## Safety
 
 - Files already matched in `DestDir` (by basename) are always skipped — no re-encoding.
-- Outputs go to a temporary subfolder (`.videncode-temp`) first; only moved to `DestDir` on success.
+- Files already held in `.videncode-ready` are skipped from encoding — they will be flushed on the next run.
+- Outputs go to a temporary subfolder (`.videncode-temp`) first; only moved on success.
 - Failed encodes leave the source file untouched; the temporary output is discarded.
+- When `DestDir` is full, encoded outputs are held in `.videncode-ready` rather than discarded. The run continues and exits `partial` rather than `failed`.
 - Use `-DryRun` to review the planned work before committing.
 - Without `-NoConfirm`, a summary is shown and you must confirm before encoding starts.
 
