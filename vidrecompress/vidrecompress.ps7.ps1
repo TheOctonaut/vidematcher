@@ -404,6 +404,10 @@ if ($null -ne $resolvedPresetImportFile) {
     Write-Host "Preset import file: $resolvedPresetImportFile"
 }
 Write-Host "TempDir: $tempRoot"
+$stopFile  = Join-Path $tempRoot 'vidrecompress.stop'
+$pauseFile = Join-Path $tempRoot 'vidrecompress.pause'
+Write-Host "To stop cleanly between files: create '$stopFile'"
+Write-Host "To pause between files:        create '$pauseFile'"
 Write-Host ""
 
 # ---------------------------------------------------------------------------
@@ -421,9 +425,30 @@ $currentTempFile = $null
 $fileTimings = [System.Collections.Generic.List[double]]::new()
 $fileWatch   = [System.Diagnostics.Stopwatch]::new()
 $spaceSavedBytes = [long]0
+$stopRequested = $false
+$runCompleted  = $false
+$status        = $null
 
 try {
     foreach ($file in $candidateFiles) {
+        # Check stop sentinel before starting next encode
+        if (Test-Path -LiteralPath $stopFile -PathType Leaf) {
+            Remove-Item -LiteralPath $stopFile -Force -ErrorAction SilentlyContinue
+            Write-Host "[Stop requested] Stopping before next file."
+            $stopRequested = $true
+            break
+        }
+
+        # Check pause sentinel - wait until removed
+        if (Test-Path -LiteralPath $pauseFile -PathType Leaf) {
+            Write-Host "[Paused] Remove '$pauseFile' to resume..." -NoNewline
+            while (Test-Path -LiteralPath $pauseFile -PathType Leaf) {
+                Write-Host "." -NoNewline
+                Start-Sleep -Seconds 5
+            }
+            Write-Host " resuming."
+        }
+
         $fileIndex++
         $fileWatch.Restart()
         $outName = $file.BaseName + $resolvedOutputExtension
@@ -560,51 +585,59 @@ try {
         $pct = [math]::Min(100, [math]::Round(($fileIndex / $candidateCount) * 100))
         Write-Progress -Activity "vidrecompress" -Status $progressStatus -PercentComplete $pct
     }
+    $runCompleted = $true
 }
 finally {
     if ($null -ne $currentTempFile -and (Test-Path -LiteralPath $currentTempFile -PathType Leaf)) {
         Remove-Item -LiteralPath $currentTempFile -Force -ErrorAction SilentlyContinue
         Write-Host "Cleaned up partial temp file: $currentTempFile"
     }
+
+    Write-Progress -Activity "vidrecompress" -Completed
+    $sessionWatch.Stop()
+
+    $interrupted = (-not $runCompleted -and -not $stopRequested)
+
+    $status = if ($interrupted) {
+        "interrupted"
+    }
+    elseif ($stopRequested) {
+        "stopped"
+    }
+    elseif ($encodeFailed -gt 0) {
+        "failed"
+    }
+    elseif ($candidateCount -eq 0 -or ($skippedNoSpace -eq $candidateCount)) {
+        "noop"
+    }
+    else {
+        "ok"
+    }
+
+    $totalSecs    = [math]::Round($sessionWatch.Elapsed.TotalSeconds, 1)
+    $savedMb      = [math]::Round($spaceSavedBytes / 1MB, 1)
+    $savedDisplay = Format-SavedSize -Bytes $spaceSavedBytes
+
+    Write-Host ""
+    Write-Host "Recompress run"
+    Write-Host (" status:            {0}" -f $status)
+    Write-Host (" total:             {0}s" -f $totalSecs)
+    Write-Host (" candidates:        {0}" -f $candidateCount)
+    Write-Host (" skipped_existing:  {0}" -f $skippedExisting)
+    Write-Host (" encoded:           {0}  failed: {1}" -f $encoded, $encodeFailed)
+    Write-Host (" replaced:          {0}  kept_original: {1}" -f $replaced, $keptOriginal)
+    Write-Host (" space_saved:       {0}" -f $savedDisplay)
+    if ($skippedNoSpace -gt 0) {
+        Write-Host (" skipped_no_space:  {0}" -f $skippedNoSpace)
+    }
+    if ($warnings -gt 0) {
+        Write-Host (" warnings:          {0}" -f $warnings)
+    }
+    Write-Host ""
+    Write-Host ("SUMMARY|tool=vidrecompress|status={0}|dry_run=false|candidates={1}|skipped_existing={2}|skipped_no_space={3}|encoded={4}|encode_failed={5}|replaced={6}|kept_original={7}|space_saved_mb={8}|warnings={9}" -f $status, $candidateCount, $skippedExisting, $skippedNoSpace, $encoded, $encodeFailed, $replaced, $keptOriginal, $savedMb, $warnings)
 }
 
-Write-Progress -Activity "vidrecompress" -Completed
-
-$sessionWatch.Stop()
-
-$status = if ($encodeFailed -gt 0) {
-    "failed"
-}
-elseif ($candidateCount -eq 0 -or ($skippedNoSpace -eq $candidateCount)) {
-    "noop"
-}
-else {
-    "ok"
-}
-
-$totalSecs = [math]::Round($sessionWatch.Elapsed.TotalSeconds, 1)
-$savedMb   = [math]::Round($spaceSavedBytes / 1MB, 1)
-$savedDisplay = Format-SavedSize -Bytes $spaceSavedBytes
-
-Write-Host ""
-Write-Host "Recompress run"
-Write-Host (" status:            {0}" -f $status)
-Write-Host (" total:             {0}s" -f $totalSecs)
-Write-Host (" candidates:        {0}" -f $candidateCount)
-Write-Host (" skipped_existing:  {0}" -f $skippedExisting)
-Write-Host (" encoded:           {0}  failed: {1}" -f $encoded, $encodeFailed)
-Write-Host (" replaced:          {0}  kept_original: {1}" -f $replaced, $keptOriginal)
-Write-Host (" space_saved:       {0}" -f $savedDisplay)
-if ($skippedNoSpace -gt 0) {
-    Write-Host (" skipped_no_space:  {0}" -f $skippedNoSpace)
-}
-if ($warnings -gt 0) {
-    Write-Host (" warnings:          {0}" -f $warnings)
-}
-Write-Host ""
-Write-Host ("SUMMARY|tool=vidrecompress|status={0}|dry_run=false|candidates={1}|skipped_existing={2}|skipped_no_space={3}|encoded={4}|encode_failed={5}|replaced={6}|kept_original={7}|space_saved_mb={8}|warnings={9}" -f $status, $candidateCount, $skippedExisting, $skippedNoSpace, $encoded, $encodeFailed, $replaced, $keptOriginal, $savedMb, $warnings)
-
-if ($status -eq "failed") {
+if ($status -eq "failed" -or $status -eq "interrupted") {
     exit 1
 }
 
