@@ -119,6 +119,19 @@ function Format-SavedSize {
     return ("{0:N1} MB" -f ($Bytes / 1MB))
 }
 
+function Write-Log {
+    param(
+        [Parameter(Mandatory = $true)][string]$Message,
+        [string]$LogFile
+    )
+    if ([string]::IsNullOrEmpty($LogFile)) { return }
+    $line = "[{0:yyyy-MM-dd HH:mm:ss}] {1}" -f (Get-Date), $Message
+    try {
+        Add-Content -LiteralPath $LogFile -Value $line -ErrorAction SilentlyContinue
+    }
+    catch {}
+}
+
 function Get-DriveFreeBytes {
     param([Parameter(Mandatory = $true)][string]$Path)
     try {
@@ -406,6 +419,8 @@ if ($null -ne $resolvedPresetImportFile) {
 Write-Host "TempDir: $tempRoot"
 $stopFile  = Join-Path $tempRoot 'vidrecompress.stop'
 $pauseFile = Join-Path $tempRoot 'vidrecompress.pause'
+$logFile   = Join-Path $tempRoot 'vidrecompress.log'
+Write-Host "Log file: $logFile"
 Write-Host "To stop cleanly between files: create '$stopFile'"
 Write-Host "To pause between files:        create '$pauseFile'"
 Write-Host ""
@@ -429,12 +444,15 @@ $stopRequested = $false
 $runCompleted  = $false
 $status        = $null
 
+Write-Log -LogFile $logFile -Message ("=== Run started | source={0} | candidates={1} | preset={2}" -f $resolvedSourceDir, $candidateCount, $resolvedPresetName)
+
 try {
     foreach ($file in $candidateFiles) {
         # Check stop sentinel before starting next encode
         if (Test-Path -LiteralPath $stopFile -PathType Leaf) {
             Remove-Item -LiteralPath $stopFile -Force -ErrorAction SilentlyContinue
             Write-Host "[Stop requested] Stopping before next file."
+            Write-Log -LogFile $logFile -Message "[Stop requested] Stopping before next file."
             $stopRequested = $true
             break
         }
@@ -442,11 +460,13 @@ try {
         # Check pause sentinel - wait until removed
         if (Test-Path -LiteralPath $pauseFile -PathType Leaf) {
             Write-Host "[Paused] Remove '$pauseFile' to resume..." -NoNewline
+            Write-Log -LogFile $logFile -Message "[Paused]"
             while (Test-Path -LiteralPath $pauseFile -PathType Leaf) {
                 Write-Host "." -NoNewline
                 Start-Sleep -Seconds 5
             }
             Write-Host " resuming."
+            Write-Log -LogFile $logFile -Message "[Resumed]"
         }
 
         $fileIndex++
@@ -461,6 +481,7 @@ try {
         $freeBytes = Get-DriveFreeBytes -Path $tempRoot
         if ($null -ne $freeBytes -and $freeBytes -lt $spaceNeeded) {
             Write-Warning ("Not enough space in TempDir ({0:N0} bytes free, {1:N0} needed): skipping {2}" -f $freeBytes, $spaceNeeded, $file.Name)
+            Write-Log -LogFile $logFile -Message ("Skipped (no space): {0} (free={1}, needed={2})" -f $file.Name, (Format-SavedSize -Bytes $freeBytes), (Format-SavedSize -Bytes $spaceNeeded))
             $skippedNoSpace++
             if ($VerboseConsole) {
                 Write-Host ("PROGRESS|tool=vidrecompress|event=update|index={0}|total={1}|file={2}|elapsed_seconds={3}|encoded={4}|replaced={5}|kept_original={6}|encode_failed={7}" -f $fileIndex, $candidateCount, $progressFile, ([math]::Round($sessionWatch.Elapsed.TotalSeconds, 1)), $encoded, $replaced, $keptOriginal, $encodeFailed)
@@ -512,6 +533,7 @@ try {
             if ($exitCode -ne 0 -or -not (Test-Path -LiteralPath $tempOutput -PathType Leaf)) {
                 $encodeFailed++
                 Write-Warning "HandBrakeCLI failed for '$($file.FullName)' (ExitCode: $exitCode)"
+                Write-Log -LogFile $logFile -Message ("Failed: {0} (ExitCode: {1})" -f $file.Name, $exitCode)
                 if (-not [string]::IsNullOrWhiteSpace($stderr)) {
                     Write-Warning ($stderr.TrimEnd() -replace "\r?\n", [Environment]::NewLine)
                 }
@@ -538,9 +560,11 @@ try {
                         $fileSavedDisplay = Format-SavedSize -Bytes $fileSavedBytes
                         $totalSavedDisplay = Format-SavedSize -Bytes $spaceSavedBytes
                         Write-Host ("Replaced: {0} ({1:N0} -> {2:N0} bytes, saved {3}; total saved {4})" -f $file.Name, $file.Length, $tempSize, $fileSavedDisplay, $totalSavedDisplay)
+                        Write-Log -LogFile $logFile -Message ("Replaced: {0} ({1} -> {2}, saved {3}; total saved {4})" -f $file.Name, (Format-SavedSize -Bytes $file.Length), (Format-SavedSize -Bytes $tempSize), $fileSavedDisplay, $totalSavedDisplay)
                     }
                     catch {
                         Write-Warning "Failed to replace source file '$($file.FullName)': $($_.Exception.Message)"
+                        Write-Log -LogFile $logFile -Message ("Replace-failed: {0} | {1}" -f $file.Name, $_.Exception.Message)
                         $warnings++
                         if (Test-Path -LiteralPath $tempOutput -PathType Leaf) {
                             Remove-Item -LiteralPath $tempOutput -Force -ErrorAction SilentlyContinue
@@ -551,6 +575,7 @@ try {
                     Remove-Item -LiteralPath $tempOutput -Force -ErrorAction SilentlyContinue
                     $keptOriginal++
                     Write-Host ("Kept original: {0} (encoded {1:N0} bytes >= source {2:N0} bytes)" -f $file.Name, $tempSize, $file.Length)
+                    Write-Log -LogFile $logFile -Message ("Kept original: {0} (encoded {1} >= source {2})" -f $file.Name, (Format-SavedSize -Bytes $tempSize), (Format-SavedSize -Bytes $file.Length))
                 }
 
                 $currentTempFile = $null
@@ -635,6 +660,7 @@ finally {
     }
     Write-Host ""
     Write-Host ("SUMMARY|tool=vidrecompress|status={0}|dry_run=false|candidates={1}|skipped_existing={2}|skipped_no_space={3}|encoded={4}|encode_failed={5}|replaced={6}|kept_original={7}|space_saved_mb={8}|warnings={9}" -f $status, $candidateCount, $skippedExisting, $skippedNoSpace, $encoded, $encodeFailed, $replaced, $keptOriginal, $savedMb, $warnings)
+    Write-Log -LogFile $logFile -Message ("=== Run finished | status={0} | encoded={1} | replaced={2} | kept_original={3} | encode_failed={4} | space_saved={5} | elapsed={6}s" -f $status, $encoded, $replaced, $keptOriginal, $encodeFailed, $savedDisplay, $totalSecs)
 }
 
 if ($status -eq "failed" -or $status -eq "interrupted") {
