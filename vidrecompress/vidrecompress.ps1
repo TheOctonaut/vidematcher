@@ -24,6 +24,10 @@ param(
     [string[]]$SourceExtensions,
 
     [Parameter(Mandatory = $false)]
+    [ValidateSet("name_asc", "name_desc", "size_asc", "size_desc")]
+    [string]$ProcessOrder,
+
+    [Parameter(Mandatory = $false)]
     [switch]$Recurse,
 
     [Parameter(Mandatory = $false)]
@@ -151,6 +155,7 @@ $defaults = [PSCustomObject]@{
     HandBrakeCliPath = "HandBrakeCLI"
     OutputExtension  = ".mp4"
     SourceExtensions = @(".avi")
+    ProcessOrder     = "size_desc"
     Recurse          = $false
 }
 
@@ -172,13 +177,14 @@ if (-not (Test-Path -LiteralPath $OptionsFile -PathType Leaf)) {
             }
             else {
                 $defaultOptions = [ordered]@{
-                    SourceDir        = "Z:/"
+                    SourceDir        = "C:/path/to/library"
                     TempDir          = "C:/path/to/temp-encode"
                     PresetName       = "My Custom Preset"
                     PresetImportFile = "C:/path/to/custom-presets.json"
                     HandBrakeCliPath = $defaults.HandBrakeCliPath
                     OutputExtension  = $defaults.OutputExtension
                     SourceExtensions = $defaults.SourceExtensions
+                    ProcessOrder     = $defaults.ProcessOrder
                     Recurse          = $defaults.Recurse
                 }
                 $defaultOptions | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $OptionsFile -Encoding UTF8
@@ -256,6 +262,19 @@ else {
     if ($null -ne $v -and $v.Count -gt 0) { $v } else { $defaults.SourceExtensions }
 }
 
+$resolvedProcessOrder = if ($PSBoundParameters.ContainsKey("ProcessOrder")) {
+    Normalize-OptionalString $ProcessOrder
+}
+else {
+    Normalize-OptionalString (Get-OptionValue -Options $fileOptions -Name "ProcessOrder")
+}
+if ($null -eq $resolvedProcessOrder) {
+    $resolvedProcessOrder = $defaults.ProcessOrder
+}
+else {
+    $resolvedProcessOrder = $resolvedProcessOrder.ToLowerInvariant()
+}
+
 $resolvedRecurse = if ($PSBoundParameters.ContainsKey("Recurse")) {
     [bool]$Recurse
 }
@@ -278,6 +297,10 @@ if ([string]::IsNullOrWhiteSpace($resolvedTempDir)) {
 
 if ([string]::IsNullOrWhiteSpace($resolvedPresetName)) {
     throw "PresetName is required. Provide -PresetName or set PresetName in options.json."
+}
+
+if ($resolvedProcessOrder -notin @("name_asc", "name_desc", "size_asc", "size_desc")) {
+    throw "ProcessOrder must be one of: name_asc, name_desc, size_asc, size_desc."
 }
 
 if (-not (Test-Path -LiteralPath $resolvedSourceDir -PathType Container)) {
@@ -355,10 +378,17 @@ foreach ($file in $allFiles) {
     $candidateFiles.Add($file)
 }
 
+$candidateFiles = switch ($resolvedProcessOrder) {
+    "name_asc"  { @($candidateFiles | Sort-Object -Property BaseName, FullName) }
+    "name_desc" { @($candidateFiles | Sort-Object -Property @{ Expression = "BaseName"; Descending = $true }, @{ Expression = "FullName"; Descending = $true }) }
+    "size_asc"  { @($candidateFiles | Sort-Object -Property Length, BaseName, FullName) }
+    default     { @($candidateFiles | Sort-Object -Property @{ Expression = "Length"; Descending = $true }, BaseName, FullName) }
+}
+
 $candidateCount = $candidateFiles.Count
 $totalScanned = $skippedExisting + $candidateCount
 
-Write-Host "Files found: $totalScanned  |  Already have $($resolvedOutputExtension): $skippedExisting  |  Candidates: $candidateCount"
+Write-Host "Files found: $totalScanned  |  Already have $($resolvedOutputExtension): $skippedExisting  |  Candidates: $candidateCount  |  Order: $resolvedProcessOrder"
 
 if ($candidateCount -eq 0) {
     Write-Host "No candidate files to recompress."
@@ -391,6 +421,7 @@ Write-Host ""
 Write-Host "Found $candidateCount $($resolvedSourceExtensions -join '/') file(s) to recompress in: $sourceRoot"
 Write-Host "  $skippedExisting already have $resolvedOutputExtension -- will skip"
 Write-Host "  $candidateCount candidates to encode"
+Write-Host "  processing order: $resolvedProcessOrder"
 Write-Host "This will REPLACE source files with encoded versions if smaller."
 
 if (-not $NoConfirm) {
@@ -418,6 +449,7 @@ elseif ($null -eq $tempRoot) {
 Write-Host ""
 Write-Host "HandBrakeCLI: $resolvedHandBrakeCliPath"
 Write-Host "Preset: $resolvedPresetName"
+Write-Host "Process order: $resolvedProcessOrder"
 if ($null -ne $resolvedPresetImportFile) {
     Write-Host "Preset import file: $resolvedPresetImportFile"
 }
@@ -449,7 +481,7 @@ $stopRequested = $false
 $runCompleted  = $false
 $status        = $null
 
-Write-Log -LogFile $logFile -Message ("=== Run started | source={0} | candidates={1} | preset={2}" -f $resolvedSourceDir, $candidateCount, $resolvedPresetName)
+Write-Log -LogFile $logFile -Message ("=== Run started | source={0} | candidates={1} | preset={2} | order={3}" -f $resolvedSourceDir, $candidateCount, $resolvedPresetName, $resolvedProcessOrder)
 
 try {
     foreach ($file in $candidateFiles) {

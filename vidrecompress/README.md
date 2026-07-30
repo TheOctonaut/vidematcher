@@ -21,6 +21,12 @@ This is an in-place recompression workflow — not the normal collect → pick �
 
 # Unattended / scripted
 .\vidrecompress.ps7.ps1 -NoConfirm
+
+# Process largest files first (default)
+.\vidrecompress.ps7.ps1 -ProcessOrder size_desc
+
+# Process smallest files first (better for quick stop/pause responsiveness)
+.\vidrecompress.ps7.ps1 -ProcessOrder size_asc
 ```
 
 ## Parameters
@@ -34,6 +40,7 @@ This is an in-place recompression workflow — not the normal collect → pick �
 | `-HandBrakeCliPath` | No | `HandBrakeCLI` | Path to `HandBrakeCLI.exe` (or name if on PATH) |
 | `-OutputExtension` | No | `.mp4` | Output file extension |
 | `-SourceExtensions` | No | `.avi` | Source file extensions to scan |
+| `-ProcessOrder` | No | `size_desc` | Candidate ordering: `name_asc`, `name_desc`, `size_asc`, `size_desc` |
 | `-Recurse` | No | `false` | Scan subdirectories |
 | `-OptionsFile` | No | sibling `options.json` | Path to options file |
 | `-DryRun` | No | — | Preview without making changes |
@@ -57,6 +64,7 @@ Config precedence: CLI arguments > `options.json` > script defaults.
   "HandBrakeCliPath": "HandBrakeCLI",
   "OutputExtension": ".mp4",
   "SourceExtensions": [".avi"],
+  "ProcessOrder": "size_desc",
   "Recurse": false
 }
 ```
@@ -64,13 +72,14 @@ Config precedence: CLI arguments > `options.json` > script defaults.
 ## Workflow
 
 1. Scans `SourceDir` for files matching `SourceExtensions` (root only, or recursive with `-Recurse`).
-2. Skips any file whose basename already has a matching output file (e.g. `.mp4`) in the same directory.
-3. Checks that `TempDir` has enough free space (`fileSize × 1.2 + 100 MB`); skips file and logs warning if not.
-4. Encodes the file with HandBrakeCLI into `TempDir`.
-5. Compares sizes:
+2. Orders candidates using `ProcessOrder` (`size_desc` by default).
+3. Skips any file whose basename already has a matching output file (e.g. `.mp4`) in the same directory.
+4. Checks that `TempDir` has enough free space (`fileSize × 1.2 + 100 MB`); skips file and logs warning if not.
+5. Encodes the file with HandBrakeCLI into `TempDir`.
+6. Compares sizes:
    - **Encoded is smaller**: deletes the source `.avi`, moves the `.mp4` to the same directory.
    - **Encoded is same size or larger**: deletes the temp file, keeps the original (not a failure).
-6. On error or interruption, cleans up any partial temp file for the current in-progress file.
+7. On error or interruption, cleans up any partial temp file for the current in-progress file.
 
 ## Console output
 
