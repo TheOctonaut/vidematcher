@@ -1,0 +1,43 @@
+{
+  "manifest_version": 2,
+  "name": "vidwebmatch",
+  "version": "0.1.0",
+  "description": "Annotate .avi names on matching pages using local file status via native messaging.",
+  "permissions": [
+    "nativeMessaging",
+    "storage",
+    "tabs",
+    "activeTab",
+    "<all_urls>"
+  ],
+  "background": {
+    "scripts": [
+      "background.js"
+    ]
+  },
+  "browser_action": {
+    "default_title": "vidwebmatch",
+    "default_popup": "popup.html"
+  },
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": true
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "content-script.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "vidwebmatch@theoctonaut.local",
+      "strict_min_version": "109.0"
+    }
+  }
+}

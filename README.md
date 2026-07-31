@@ -71,6 +71,19 @@ Runs the full pipeline in one command: picks files from staging, checks which on
 
 ---
 
+### [vidwebmatch](vidwebmatch/)
+
+Firefox WebExtension + Windows native helper that annotates `.avi` filenames on matching pages by checking a configured local video library root using basename matching (extension ignored).
+
+- Statuses: `missing`, `avi_only`, `mp4_only`, `both`
+- Batched native-messaging queries with helper-side index caching
+- Includes Windows install/uninstall scripts for native-host registration
+- Temporary Firefox add-on loaded from `vidwebmatch/extension/manifest.json`; helper installed with `vidwebmatch/install-helper.ps1`
+
+→ See [vidwebmatch/README.md](vidwebmatch/README.md)
+
+---
+
 ## Workflow
 
 ```text

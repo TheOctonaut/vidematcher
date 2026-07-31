@@ -1,0 +1,8 @@
+{
+  "SearchRoot": "C:/path/to/video-library",
+  "MatchExtensions": [".avi", ".mp4"],
+  "CaseInsensitive": true,
+  "MaxBatchSize": 200,
+  "CacheTtlSeconds": 30,
+  "LogPath": "C:/path/to/vidwebmatch/logs/native-host.log"
+}

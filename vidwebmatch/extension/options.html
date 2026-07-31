@@ -1,0 +1,266 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>vidwebmatch options</title>
+  <style>
+    body {
+      font-family: Segoe UI, Arial, sans-serif;
+      margin: 20px;
+      max-width: 840px;
+    }
+    h1 {
+      margin-top: 0;
+    }
+    .row {
+      margin-bottom: 14px;
+    }
+    label {
+      display: block;
+      font-weight: 600;
+      margin-bottom: 4px;
+    }
+    .input-with-button {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .input-with-button input[type="text"] {
+      flex: 1;
+    }
+    input[type="number"], input[type="text"], textarea {
+      width: 100%;
+      box-sizing: border-box;
+      padding: 8px;
+    }
+    textarea {
+      min-height: 100px;
+      font-family: Consolas, "Courier New", monospace;
+    }
+    .checks label {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-weight: 400;
+    }
+    button {
+      padding: 8px 16px;
+      cursor: pointer;
+    }
+    .pill-editor {
+      border: 1px solid #bbb;
+      border-radius: 6px;
+      padding: 8px;
+      background: #fafafa;
+    }
+    .pill-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      min-height: 30px;
+      margin-bottom: 8px;
+    }
+    .pill-empty {
+      color: #666;
+      font-size: 12px;
+    }
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      background: #e8eefc;
+      color: #1f2f55;
+      border: 1px solid #c8d6f7;
+      border-radius: 999px;
+      padding: 3px 8px;
+      font-size: 12px;
+      line-height: 1.4;
+    }
+    .pill-remove {
+      border: none;
+      background: transparent;
+      color: #425a9e;
+      font-weight: 700;
+      padding: 0;
+      margin: 0;
+      cursor: pointer;
+      min-width: 14px;
+      line-height: 1;
+    }
+    .pill-controls {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .pill-controls input[type="text"] {
+      flex: 1;
+    }
+    .dismissed-panel {
+      border: 1px solid #bbb;
+      border-radius: 6px;
+      padding: 10px;
+      background: #fafafa;
+    }
+    .dismissed-toolbar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 8px;
+    }
+    .dismissed-toolbar input[type="text"] {
+      flex: 1;
+    }
+    .dismissed-meta {
+      color: #555;
+      font-size: 12px;
+      margin-bottom: 6px;
+    }
+    .dismissed-list {
+      max-height: none;
+      overflow: visible;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+      background: #fff;
+    }
+    .dismissed-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      border-bottom: 1px solid #eee;
+      padding: 3px 6px;
+    }
+    .dismissed-item:last-child {
+      border-bottom: none;
+    }
+    .dismissed-item-text {
+      flex: 1;
+      min-width: 0;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      font-size: 11px;
+    }
+    .dismissed-pagination {
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 8px;
+      margin-top: 8px;
+      font-size: 12px;
+    }
+    .dismissed-empty {
+      color: #666;
+      font-size: 12px;
+      padding: 8px 6px;
+    }
+    #status {
+      margin-left: 12px;
+      font-size: 13px;
+    }
+  </style>
+</head>
+<body>
+  <h1>vidwebmatch options</h1>
+
+  <div class="row">
+    <label for="urlPatterns">URL patterns (one match pattern per line)</label>
+    <textarea id="urlPatterns" placeholder="*://example.com/*"></textarea>
+  </div>
+
+  <div class="row checks">
+    <label><input type="checkbox" id="scanLinks"> Scan links (href + link text)</label>
+    <label><input type="checkbox" id="scanVisibleText"> Scan visible page text</label>
+    <label><input type="checkbox" id="scanScopedTitles"> Scan scoped title text (no extension)</label>
+    <label><input type="checkbox" id="dimDatePattern"> Dim date-like text pattern (NN NN NN)</label>
+    <label><input type="checkbox" id="removeDimRows"> Remove matched rows instead of dimming</label>
+  </div>
+
+  <div class="row">
+    <label for="titleScopeSelector">Scoped title selector (CSS)</label>
+    <input type="text" id="titleScopeSelector" placeholder=".torrentNameInfo">
+  </div>
+
+  <div class="row">
+    <label for="studiosListInput">Studios (comma separated)</label>
+    <div class="pill-editor">
+      <div class="pill-list" id="studiosListPills"></div>
+      <div class="pill-controls">
+        <input type="text" id="studiosListInput" placeholder="ExampleStudio">
+        <button type="button" id="studiosListAddButton">Add</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="row">
+    <label for="actorsListInput">Actors (comma separated)</label>
+    <div class="pill-editor">
+      <div class="pill-list" id="actorsListPills"></div>
+      <div class="pill-controls">
+        <input type="text" id="actorsListInput" placeholder="ExampleActor">
+        <button type="button" id="actorsListAddButton">Add</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="row">
+    <label for="dimStringsInput">Dim substrings — reduce text visibility of matching words (comma separated)</label>
+    <div class="pill-editor">
+      <div class="pill-list" id="dimStringsPills"></div>
+      <div class="pill-controls">
+        <input type="text" id="dimStringsInput" placeholder="XXX">
+        <button type="button" id="dimStringsAddButton">Add</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="row">
+    <label for="dimRowsInput">Dim rows — match strings for parent table row (TR) dim/remove (comma separated)</label>
+    <div class="pill-editor">
+      <div class="pill-list" id="dimRowsPills"></div>
+      <div class="pill-controls">
+        <input type="text" id="dimRowsInput" placeholder="UnwantedProducer">
+        <button type="button" id="dimRowsAddButton">Add</button>
+        <button type="button" id="copyDimRowsButton" title="Copy as -term filters">Copy -filters</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="row">
+    <label for="dismissedSearchInput">Dismissed exact titles</label>
+    <div class="dismissed-panel">
+      <div class="dismissed-toolbar">
+        <input type="text" id="dismissedSearchInput" placeholder="Filter dismissed titles">
+      </div>
+      <div class="dismissed-meta" id="dismissedMeta">0 entries</div>
+      <div class="dismissed-list" id="dismissedList"></div>
+      <div class="dismissed-pagination">
+        <button type="button" id="dismissedPrevButton">Previous</button>
+        <span id="dismissedPageInfo">Page 1 of 1</span>
+        <button type="button" id="dismissedNextButton">Next</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="row">
+    <label for="batchSize">Batch size (native helper request)</label>
+    <input type="number" id="batchSize" min="1" max="500">
+  </div>
+
+  <div class="row">
+    <label for="maxCandidatesPerScan">Max candidates per scan</label>
+    <input type="number" id="maxCandidatesPerScan" min="50" max="10000">
+  </div>
+
+  <div class="row">
+    <label for="debounceMs">DOM change debounce (ms)</label>
+    <input type="number" id="debounceMs" min="50" max="5000">
+  </div>
+
+  <div class="row">
+    <button id="saveButton">Save</button>
+    <span id="status"></span>
+  </div>
+
+  <script src="options.js"></script>
+</body>
+</html>
