@@ -2,3 +2,5 @@
 *.lnk
 options.json
 *.log
+vidwebmatch/native-host/bin/
+vidwebmatch/native-host/obj/

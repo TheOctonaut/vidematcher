@@ -4,6 +4,10 @@ const BADGE_CLASS = "vidwebmatch-status-badge";
 const BANNER_ID = "vidwebmatch-helper-banner";
 const DIM_SPAN_ATTR = "data-vidwebmatch-dim";
 const DIMROW_CLASS = "vidwebmatch-dimrow";
+const HIDDENROW_CLASS = "vidwebmatch-row-hidden";
+const DISMISS_BUTTON_CLASS = "vidwebmatch-row-dismiss-button";
+const FLOATING_DISMISS_ID = "vidwebmatch-floating-dismiss";
+const FLOATING_DISMISS_CLASS = "vidwebmatch-floating-dismiss-button";
 const AVI_REGEX = /([A-Za-z0-9][A-Za-z0-9 _.\-]*\.avi)\b/gi;
 const EXCLUDED_TAGS = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "TEXTAREA"]);
 
@@ -14,6 +18,21 @@ let scanning = false;
 let queuedForceRefresh = false;
 let nextNodeId = 1;
 const nodeIds = new WeakMap();
+
+let floatingDismissLockedUntil = Date.now() + 3000;
+let floatingDismissLockTimer = null;
+
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") {
+    floatingDismissLockedUntil = Date.now() + 3000;
+    clearInterval(floatingDismissLockTimer);
+    floatingDismissLockTimer = null;
+    if (latestSettings) {
+      manageFloatingDismissButton(latestSettings);
+    }
+    scheduleScan(false, false);
+  }
+});
 
 bootstrap().catch(() => {
   // Keep the page functional even if initialization fails.
@@ -92,11 +111,14 @@ async function runScan() {
     const extraction = extractCandidates(latestSettings);
     clearBanner();
 
-    // Gather all scoped nodes for dim annotation (runs regardless of helper state).
+    // Gather scoped nodes for title-based features (matching and dim/row actions).
     const titleSelector = normalizeSelector(latestSettings.titleScopeSelector, ".torrentNameInfo");
-    const allScopedNodes = latestSettings.scanScopedTitles
-      ? Array.from(safeQuerySelectorAll(titleSelector))
-      : [];
+    const hasDimRows = Array.isArray(latestSettings.dimRows) && latestSettings.dimRows.length > 0;
+    const hasDimStrings = Array.isArray(latestSettings.dimStrings) && latestSettings.dimStrings.length > 0;
+    const hasDimDatePattern = Boolean(latestSettings.dimDatePattern);
+    const hasDismissedTitles = Array.isArray(latestSettings.dismissedTitles) && latestSettings.dismissedTitles.length > 0;
+    const needsScopedNodes = Boolean(latestSettings.scanScopedTitles) || hasDimRows || hasDimStrings || hasDimDatePattern || hasDismissedTitles;
+    const allScopedNodes = needsScopedNodes ? Array.from(safeQuerySelectorAll(titleSelector)) : [];
 
     if (extraction.uniqueFilenames.length > 0) {
       const response = await browser.runtime.sendMessage({
@@ -119,6 +141,7 @@ async function runScan() {
     }
 
     applyDimAnnotations(allScopedNodes, latestSettings);
+    manageFloatingDismissButton(latestSettings);
   } finally {
     scanning = false;
   }
@@ -582,6 +605,18 @@ function isOurNode(node) {
     return true;
   }
 
+  if (node.classList && node.classList.contains(DISMISS_BUTTON_CLASS)) {
+    return true;
+  }
+
+  if (node.id === FLOATING_DISMISS_ID) {
+    return true;
+  }
+
+  if (node.classList && node.classList.contains(FLOATING_DISMISS_CLASS)) {
+    return true;
+  }
+
   if (node.tagName === "STYLE" && typeof node.textContent === "string" && node.textContent.indexOf(BADGE_CLASS) >= 0) {
     return true;
   }
@@ -592,12 +627,20 @@ function isOurNode(node) {
 // --- Dim annotation helpers ---
 
 function applyDimAnnotations(allScopedNodes, settings) {
-  if (!allScopedNodes || allScopedNodes.length === 0) {
-    return;
-  }
+  const scopedNodes = Array.isArray(allScopedNodes) ? allScopedNodes : [];
 
   const dimStrings = Array.isArray(settings && settings.dimStrings) ? settings.dimStrings.filter(Boolean) : [];
   const dimRows = Array.isArray(settings && settings.dimRows) ? settings.dimRows.filter(Boolean) : [];
+  const dismissedTitles = Array.isArray(settings && settings.dismissedTitles) ? settings.dismissedTitles.filter(Boolean) : [];
+  const dismissedTitleKeys = new Set();
+  for (const item of dismissedTitles) {
+    const key = normalizeTitleForExactMatch(item);
+    if (key) {
+      dismissedTitleKeys.add(key);
+    }
+  }
+  const removeDimRows = Boolean(settings && settings.removeDimRows);
+  const dimDatePattern = Boolean(settings && settings.dimDatePattern);
 
   // Disconnect observer while mutating so we don't trigger re-scans.
   const wasObserving = observer !== null;
@@ -606,17 +649,38 @@ function applyDimAnnotations(allScopedNodes, settings) {
   }
 
   try {
-    for (const node of allScopedNodes) {
-      // Dim row: apply/remove class on the scoped container element.
-      if (dimRows.length > 0) {
-        const titleText = getScopedTitleText(node);
-        if (findListMatch(titleText, dimRows)) {
-          node.classList.add(DIMROW_CLASS);
+    const staleRows = document.querySelectorAll("." + DIMROW_CLASS + ", ." + HIDDENROW_CLASS);
+    for (const row of staleRows) {
+      row.classList.remove(DIMROW_CLASS);
+      row.classList.remove(HIDDENROW_CLASS);
+    }
+    const staleDismissButtons = document.querySelectorAll("." + DISMISS_BUTTON_CLASS);
+    for (const button of staleDismissButtons) {
+      button.remove();
+    }
+    const staleDimSpans = document.querySelectorAll("[" + DIM_SPAN_ATTR + "]");
+    for (const span of staleDimSpans) {
+      if (span.parentNode) {
+        span.parentNode.replaceChild(document.createTextNode(span.textContent || ""), span);
+      }
+    }
+
+    for (const node of scopedNodes) {
+      const rowTarget = getDimTargetRow(node);
+      const titleText = getScopedTitleText(node);
+      const titleKey = normalizeTitleForExactMatch(titleText);
+
+      upsertDismissButton(node, titleText);
+
+      // Dim/remove row: apply class on the parent table row when available.
+      const isPatternRowMatch = dimRows.length > 0 && findListMatch(titleText, dimRows);
+      const isDismissedExactMatch = titleKey && dismissedTitleKeys.has(titleKey);
+      if (isPatternRowMatch || isDismissedExactMatch) {
+        if (removeDimRows) {
+          rowTarget.classList.add(HIDDENROW_CLASS);
         } else {
-          node.classList.remove(DIMROW_CLASS);
+          rowTarget.classList.add(DIMROW_CLASS);
         }
-      } else {
-        node.classList.remove(DIMROW_CLASS);
       }
 
       // Dim strings: wrap matching substrings inside the anchor with low-opacity spans.
@@ -625,14 +689,234 @@ function applyDimAnnotations(allScopedNodes, settings) {
         continue;
       }
       clearDimSpans(anchor);
-      if (dimStrings.length > 0) {
-        applyDimStringsToElement(anchor, dimStrings);
+      if (dimStrings.length > 0 || dimDatePattern) {
+        applyDimStringsToElement(anchor, dimStrings, dimDatePattern);
       }
     }
   } finally {
     if (wasObserving) {
       installObserver();
     }
+  }
+}
+
+function getDimTargetRow(node) {
+  if (!node || node.nodeType !== Node.ELEMENT_NODE) {
+    return node;
+  }
+  const row = node.closest("tr");
+  return row || node;
+}
+
+function normalizeTitleForExactMatch(value) {
+  if (typeof value !== "string") {
+    return "";
+  }
+  return value.replace(/\s+/g, " ").trim().toLowerCase();
+}
+
+function upsertDismissButton(scopedNode, scopedTitle) {
+  const anchor = getScopedTitleAnchor(scopedNode);
+  if (!anchor || !anchor.parentNode) {
+    return;
+  }
+
+  let button = null;
+  const siblings = anchor.parentNode.querySelectorAll("." + DISMISS_BUTTON_CLASS);
+  for (const candidate of siblings) {
+    if (candidate.getAttribute("data-vidwebmatch-owner-id") === getNodeOwnerId(scopedNode)) {
+      button = candidate;
+      break;
+    }
+  }
+
+  if (!button) {
+    button = document.createElement("button");
+    button.type = "button";
+    button.className = DISMISS_BUTTON_CLASS;
+    button.textContent = "x";
+    button.title = "Dismiss this exact title";
+    button.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const title = button.getAttribute("data-vidwebmatch-title") || "";
+      dismissTitleFromPage(title).catch(() => {
+        // Keep page functional even if dismiss persistence fails.
+      });
+    });
+    insertBadgeAfterNode(anchor, button);
+  }
+
+  button.setAttribute("data-vidwebmatch-owner-id", getNodeOwnerId(scopedNode));
+  button.setAttribute("data-vidwebmatch-title", scopedTitle || "");
+}
+
+function getNodeOwnerId(node) {
+  let nodeId = nodeIds.get(node);
+  if (!nodeId) {
+    nodeId = String(nextNodeId++);
+    nodeIds.set(node, nodeId);
+  }
+  return nodeId;
+}
+
+async function dismissTitleFromPage(rawTitle) {
+  const normalized = typeof rawTitle === "string" ? rawTitle.replace(/\s+/g, " ").trim() : "";
+  if (!normalized) {
+    return;
+  }
+  const response = await browser.runtime.sendMessage({
+    type: "vidwebmatch:addDismissedTitle",
+    title: normalized
+  });
+  if (!response || response.ok !== true) {
+    throw new Error("Failed to persist dismissed title.");
+  }
+  scheduleScan(false, true);
+}
+
+function manageFloatingDismissButton(settings) {
+  const title = getFloatingDismissTitleFromDom();
+  if (!title) {
+    removeFloatingDismissButton();
+    return;
+  }
+
+  const dismissedList = Array.isArray(settings && settings.dismissedTitles) ? settings.dismissedTitles : [];
+  const isAlreadyDismissed = isTitleInDismissedList(title, dismissedList);
+  upsertFloatingDismissButton(title, isAlreadyDismissed);
+}
+
+function getFloatingDismissTitleFromDom() {
+  const headers = Array.from(document.querySelectorAll("h2.tdm-section-header__title"));
+  for (const header of headers) {
+    const marker = header.querySelector("i.fa.fa-file-text-o");
+    if (!marker) {
+      continue;
+    }
+    const title = normalizeHeaderDismissTitle(header.textContent || "");
+    if (title) {
+      return title;
+    }
+  }
+  return "";
+}
+
+function normalizeHeaderDismissTitle(value) {
+  return String(value || "").replace(/\s+/g, " ").trim();
+}
+
+function isTitleInDismissedList(title, dismissedList) {
+  const target = normalizeTitleForExactMatch(title);
+  if (!target) {
+    return false;
+  }
+  for (const item of dismissedList) {
+    if (normalizeTitleForExactMatch(item) === target) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function upsertFloatingDismissButton(title, isDismissed) {
+  let button = document.getElementById(FLOATING_DISMISS_ID);
+  if (!button) {
+    button = document.createElement("button");
+    button.id = FLOATING_DISMISS_ID;
+    button.type = "button";
+    button.className = FLOATING_DISMISS_CLASS;
+    button.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      handleFloatingDismissClick(button).catch(() => {
+        // Keep page usable if dismiss action fails.
+      });
+    });
+    (document.documentElement || document.body).appendChild(button);
+  }
+
+  button.setAttribute("data-vidwebmatch-title", title);
+  const displayTitle = getDisplayTitleText(title, 72);
+  const locked = Date.now() < floatingDismissLockedUntil;
+
+  function applyLockedLabel() {
+    const remaining = Math.max(0, Math.ceil((floatingDismissLockedUntil - Date.now()) / 1000));
+    button.disabled = true;
+    button.style.opacity = "0.5";
+    button.style.cursor = "not-allowed";
+    if (isDismissed) {
+      button.textContent = "Dismissed: " + displayTitle + " (" + remaining + "s)";
+    } else {
+      button.textContent = "Dismiss title: " + displayTitle + " (" + remaining + "s)";
+    }
+  }
+
+  function applyUnlockedLabel() {
+    button.disabled = false;
+    button.style.opacity = "";
+    button.style.cursor = "";
+    if (isDismissed) {
+      button.setAttribute("data-vidwebmatch-dismissed", "true");
+      button.textContent = "Dismissed: " + displayTitle + " - click to close tab";
+      button.title = "Already dismissed title: " + title + ". Click to close this tab.";
+    } else {
+      button.setAttribute("data-vidwebmatch-dismissed", "false");
+      button.textContent = "Dismiss title: " + displayTitle;
+      button.title = "Add this exact title to dismissed list: " + title;
+    }
+  }
+
+  if (locked) {
+    clearInterval(floatingDismissLockTimer);
+    floatingDismissLockTimer = null;
+    applyLockedLabel();
+    floatingDismissLockTimer = setInterval(() => {
+      if (Date.now() >= floatingDismissLockedUntil) {
+        clearInterval(floatingDismissLockTimer);
+        floatingDismissLockTimer = null;
+        applyUnlockedLabel();
+      } else {
+        applyLockedLabel();
+      }
+    }, 500);
+  } else {
+    clearInterval(floatingDismissLockTimer);
+    floatingDismissLockTimer = null;
+    applyUnlockedLabel();
+  }
+}
+
+async function handleFloatingDismissClick(button) {
+  if (Date.now() < floatingDismissLockedUntil) {
+    return;
+  }
+  const dismissed = button.getAttribute("data-vidwebmatch-dismissed") === "true";
+  if (!dismissed) {
+    const title = button.getAttribute("data-vidwebmatch-title") || "";
+    await dismissTitleFromPage(title);
+    const displayTitle = getDisplayTitleText(title, 72);
+    button.setAttribute("data-vidwebmatch-dismissed", "true");
+    button.textContent = "Dismissed: " + displayTitle + " - click to close tab";
+    button.title = "Already dismissed title: " + title + ". Click to close this tab.";
+    return;
+  }
+
+  await browser.runtime.sendMessage({ type: "vidwebmatch:closeActiveTab" });
+}
+
+function getDisplayTitleText(title, maxLength) {
+  const normalized = normalizeHeaderDismissTitle(title);
+  if (normalized.length <= maxLength) {
+    return normalized;
+  }
+  return normalized.substring(0, maxLength - 3) + "...";
+}
+
+function removeFloatingDismissButton() {
+  const button = document.getElementById(FLOATING_DISMISS_ID);
+  if (button) {
+    button.remove();
   }
 }
 
@@ -649,7 +933,7 @@ function clearDimSpans(container) {
   container.normalize();
 }
 
-function applyDimStringsToElement(element, dimStrings) {
+function applyDimStringsToElement(element, dimStrings, includeDatePattern) {
   // Collect text nodes first (walking modifies the tree).
   const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
   const textNodes = [];
@@ -657,11 +941,11 @@ function applyDimStringsToElement(element, dimStrings) {
     textNodes.push(walker.currentNode);
   }
   for (const textNode of textNodes) {
-    applyDimStringsToTextNode(textNode, dimStrings);
+    applyDimStringsToTextNode(textNode, dimStrings, includeDatePattern);
   }
 }
 
-function applyDimStringsToTextNode(textNode, dimStrings) {
+function applyDimStringsToTextNode(textNode, dimStrings, includeDatePattern) {
   const text = textNode.nodeValue || "";
   if (!text) {
     return;
@@ -669,6 +953,15 @@ function applyDimStringsToTextNode(textNode, dimStrings) {
 
   const lowerText = text.toLowerCase();
   const intervals = [];
+
+  if (includeDatePattern) {
+    const datePattern = /\b\d{2}\s\d{2}\s\d{2}\b/g;
+    let dateMatch = datePattern.exec(text);
+    while (dateMatch !== null) {
+      intervals.push([dateMatch.index, dateMatch.index + dateMatch[0].length]);
+      dateMatch = datePattern.exec(text);
+    }
+  }
 
   for (const s of dimStrings) {
     if (typeof s !== "string" || !s) {
@@ -762,5 +1055,42 @@ style.textContent = `
 .${BADGE_CLASS}.tag-performer { background: #d63384; }
 [${DIM_SPAN_ATTR}] { opacity: 0.35; }
 .${DIMROW_CLASS} { opacity: 0.3; }
+.${HIDDENROW_CLASS} { display: none !important; }
+.${DISMISS_BUTTON_CLASS} {
+  margin-left: 6px;
+  border: 1px solid #888;
+  background: #202020;
+  color: #ddd;
+  border-radius: 10px;
+  font-size: 11px;
+  line-height: 1;
+  padding: 1px 6px;
+  cursor: pointer;
+}
+.${DISMISS_BUTTON_CLASS}:hover {
+  background: #3a3a3a;
+}
+.${FLOATING_DISMISS_CLASS} {
+  position: fixed;
+  left: 14px;
+  bottom: 14px;
+  z-index: 2147483647;
+  border: 1px solid #777;
+  background: #1e1e1e;
+  color: #f0f0f0;
+  border-radius: 18px;
+  padding: 12px 16px;
+  font-size: 14px;
+  line-height: 1.3;
+  font-weight: 600;
+  max-width: 520px;
+  font-family: Segoe UI, Arial, sans-serif;
+  cursor: pointer;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.35);
+  text-align: left;
+}
+.${FLOATING_DISMISS_CLASS}:hover {
+  background: #303030;
+}
 `;
 document.documentElement.appendChild(style);

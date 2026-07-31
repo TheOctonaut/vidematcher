@@ -1,0 +1,35 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>vidwebmatch</title>
+  <style>
+    body {
+      font-family: Segoe UI, Arial, sans-serif;
+      margin: 12px;
+      min-width: 280px;
+    }
+    .status {
+      margin-bottom: 10px;
+      padding: 8px;
+      border-radius: 4px;
+      background: #f1f1f1;
+      font-size: 12px;
+    }
+    .status.ok { background: #e7f7e7; color: #124d12; }
+    .status.fail { background: #fdeaea; color: #7a1212; }
+    button {
+      width: 100%;
+      margin-bottom: 8px;
+      padding: 8px;
+      cursor: pointer;
+    }
+  </style>
+</head>
+<body>
+  <div id="helperStatus" class="status">Checking helper...</div>
+  <button id="rescanButton">Rescan this page</button>
+  <button id="openOptionsButton">Open options</button>
+  <script src="popup.js"></script>
+</body>
+</html>

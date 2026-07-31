@@ -10,6 +10,9 @@ const DEFAULT_SETTINGS = {
   performersList: [],
   dimStrings: [],
   dimRows: [],
+  dismissedTitles: [],
+  removeDimRows: false,
+  dimDatePattern: false,
   debounceMs: 400,
   batchSize: 150,
   maxCandidatesPerScan: 2000,
@@ -46,6 +49,10 @@ async function handleMessage(message, sender) {
       return saveSettings(message.settings || {});
     }
 
+    if (message.type === "vidwebmatch:addDismissedTitle") {
+      return addDismissedTitle(message.title);
+    }
+
     if (message.type === "vidwebmatch:scanRequest") {
       return handleScanRequest(message, sender);
     }
@@ -56,6 +63,10 @@ async function handleMessage(message, sender) {
 
     if (message.type === "vidwebmatch:pingHelper") {
       return pingHelper();
+    }
+
+    if (message.type === "vidwebmatch:closeActiveTab") {
+      return closeSenderTab(sender);
     }
 
     return undefined;
@@ -79,10 +90,13 @@ function mergeSettings(partial) {
   merged.scanLinks = Boolean(merged.scanLinks);
   merged.scanVisibleText = Boolean(merged.scanVisibleText);
   merged.scanScopedTitles = Boolean(merged.scanScopedTitles);
+  merged.removeDimRows = Boolean(merged.removeDimRows);
+  merged.dimDatePattern = Boolean(merged.dimDatePattern);
   merged.producersList = normalizeStringList(merged.producersList);
   merged.performersList = normalizeStringList(merged.performersList);
   merged.dimStrings = normalizeStringList(merged.dimStrings);
   merged.dimRows = normalizeStringList(merged.dimRows);
+  merged.dismissedTitles = normalizeTitleList(merged.dismissedTitles);
   if (typeof merged.titleScopeSelector !== "string" || merged.titleScopeSelector.trim() === "") {
     merged.titleScopeSelector = DEFAULT_SETTINGS.titleScopeSelector;
   } else {
@@ -103,6 +117,18 @@ async function saveSettings(settings) {
   const merged = mergeSettings(settings);
   await browser.storage.local.set({ settings: merged });
   return { ok: true, settings: merged };
+}
+
+async function addDismissedTitle(rawTitle) {
+  const title = normalizeTitleValue(rawTitle);
+  if (!title) {
+    return { ok: false, message: "Dismissed title is empty." };
+  }
+  const current = await getSettings();
+  const dismissed = normalizeTitleList((current.dismissedTitles || []).concat([title]));
+  current.dismissedTitles = dismissed;
+  await browser.storage.local.set({ settings: current });
+  return { ok: true, dismissedTitles: dismissed };
 }
 
 function normalizePatterns(value) {
@@ -142,6 +168,34 @@ function normalizeStringList(value) {
     }
   }
   return output;
+}
+
+function normalizeTitleList(value) {
+  const items = Array.isArray(value) ? value : [value];
+  const output = [];
+  const seen = new Set();
+  for (const item of items) {
+    if (typeof item !== "string") {
+      continue;
+    }
+    const normalized = normalizeTitleValue(item);
+    if (!normalized) {
+      continue;
+    }
+    const key = normalized.toLowerCase();
+    if (!seen.has(key)) {
+      seen.add(key);
+      output.push(normalized);
+    }
+  }
+  return output;
+}
+
+function normalizeTitleValue(value) {
+  if (typeof value !== "string") {
+    return "";
+  }
+  return value.replace(/\s+/g, " ").trim();
 }
 
 function clampInteger(value, min, max, fallback) {
@@ -373,6 +427,23 @@ async function pingHelper() {
     const details = error instanceof Error ? error.message : String(error);
     return { ok: false, message: details };
   }
+}
+
+async function closeSenderTab(sender) {
+  let tabId = sender && sender.tab && typeof sender.tab.id === "number"
+    ? sender.tab.id
+    : null;
+  if (tabId === null) {
+    const tabs = await browser.tabs.query({ active: true, currentWindow: true });
+    if (tabs && tabs.length > 0 && typeof tabs[0].id === "number") {
+      tabId = tabs[0].id;
+    }
+  }
+  if (tabId === null) {
+    return { ok: false, message: "Unable to resolve current tab." };
+  }
+  await browser.tabs.remove(tabId);
+  return { ok: true };
 }
 
 function generateRequestId() {
