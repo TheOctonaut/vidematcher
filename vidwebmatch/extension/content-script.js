@@ -329,23 +329,23 @@ function getExtraBadgesForLocation(location, settings) {
   }
 
   const badges = [];
-  const producerMatch = findListMatch(text, settings && settings.producersList);
-  if (producerMatch) {
+  const studioMatch = findListMatch(text, settings && settings.studiosList);
+  if (studioMatch) {
     badges.push({
-      kind: "producer",
-      className: "tag-producer",
+      kind: "studio",
+      className: "tag-studio",
       text: "🎬⭐",
-      title: "producer match: " + producerMatch
+      title: "studio match: " + studioMatch
     });
   }
 
-  const performerMatch = findListMatch(text, settings && settings.performersList);
-  if (performerMatch) {
+  const actorMatch = findListMatch(text, settings && settings.actorsList);
+  if (actorMatch) {
     badges.push({
-      kind: "performer",
-      className: "tag-performer",
+      kind: "actor",
+      className: "tag-actor",
       text: "💃❤️",
-      title: "performer match: " + performerMatch
+      title: "actor match: " + actorMatch
     });
   }
 
@@ -1051,8 +1051,8 @@ style.textContent = `
 .${BADGE_CLASS}.status-avi_only { background: #b36a00; }
 .${BADGE_CLASS}.status-mp4_only { background: #0066cc; }
 .${BADGE_CLASS}.status-both { background: #1f7a1f; }
-.${BADGE_CLASS}.tag-producer { background: #5a2ca0; }
-.${BADGE_CLASS}.tag-performer { background: #d63384; }
+.${BADGE_CLASS}.tag-studio { background: #5a2ca0; }
+.${BADGE_CLASS}.tag-actor { background: #d63384; }
 [${DIM_SPAN_ATTR}] { opacity: 0.35; }
 .${DIMROW_CLASS} { opacity: 0.3; }
 .${HIDDENROW_CLASS} { display: none !important; }

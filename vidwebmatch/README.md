@@ -158,7 +158,7 @@ Use the options page to control what is scanned and how matches are presented:
 - `Scan visible text`: inspect page text nodes for `.avi` names
 - `Scan scoped titles`: inspect a specific DOM region for extensionless title matches
 - `Title scope selector`: CSS selector used for scoped title matching
-- `Producers` / `Performers`: partial-match label lists
+- `Studios` / `Actors`: partial-match label lists
 - `Dim strings`: substring matches to fade within titles
 - `Dim rows`: title patterns that dim or hide full table rows
 - `Remove dim rows`: hide matched rows instead of dimming them
@@ -178,7 +178,7 @@ The popup is for quick runtime checks:
 On supported pages, the extension can:
 
 - render status badges: `missing`, `avi_only`, `mp4_only`, `both`
-- add producer/performer labels on scoped title matches
+- add studio/actor labels on scoped title matches
 - dim or hide full `<tr>` rows based on configured row-match patterns
 - add inline dismiss buttons beside index-page titles
 - show a floating dismiss button on single-title pages with `h2.tdm-section-header__title`
@@ -214,9 +214,9 @@ Operational notes:
   - links (`href` and link text)
   - visible page text
 - Optional scoped title matching for extensionless names in specific DOM regions (for example `.torrentNameInfo`)
-- Optional producer/performer emoji labels for scoped title matches:
-  - Producer list match -> `🎬⭐`
-  - Performer list match -> `💃❤️`
+- Optional studio/actor emoji labels for scoped title matches:
+  - Studio list match -> `🎬⭐`
+  - Actor list match -> `💃❤️`
 - Sends deduplicated names to helper in batches.
 - Renders inline status badges.
 - Supports manual rescan from popup.
@@ -224,13 +224,13 @@ Operational notes:
 
 Scoped title matching normalizes separators (`.`, `-`, `_`, and whitespace) for matching, so a title like:
 
-- `PrivateSociety 26 07 28 Misty XXX XviD-iPT Team`
+- `Example Studio 26 07 28 Example Actor Release`
 
 can match a local basename like:
 
-- `PrivateSociety.26.07.28.Misty-XXX.XviD-iPT Team`
+- `Example.Studio.26.07.28.Example.Actor-Release`
 
-Producer/performer list matching is case-insensitive and ignores `.`, `-`, `_`, and whitespace.
+Studio/actor list matching is case-insensitive and ignores `.`, `-`, `_`, and whitespace.
 
 If helper is unavailable, page remains usable and shows a clear helper-unavailable banner.
 

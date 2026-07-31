@@ -6,8 +6,8 @@ const DEFAULT_SETTINGS = {
   scanVisibleText: true,
   scanScopedTitles: true,
   titleScopeSelector: ".torrentNameInfo",
-  producersList: [],
-  performersList: [],
+  studiosList: [],
+  actorsList: [],
   dimStrings: [],
   dimRows: [],
   dismissedTitles: [],
@@ -25,8 +25,8 @@ const scanScopedTitlesInput = document.getElementById("scanScopedTitles");
 const dimDatePatternInput = document.getElementById("dimDatePattern");
 const removeDimRowsInput = document.getElementById("removeDimRows");
 const titleScopeSelectorInput = document.getElementById("titleScopeSelector");
-const producersListEditor = createListEditor("producersList");
-const performersListEditor = createListEditor("performersList");
+const studiosListEditor = createListEditor("studiosList");
+const actorsListEditor = createListEditor("actorsList");
 const dimStringsEditor = createListEditor("dimStrings");
 const dimRowsEditor = createListEditor("dimRows");
 const copyDimRowsButton = document.getElementById("copyDimRowsButton");
@@ -131,8 +131,8 @@ async function load() {
     dimDatePatternInput.checked = Boolean(settings.dimDatePattern);
     removeDimRowsInput.checked = Boolean(settings.removeDimRows);
     titleScopeSelectorInput.value = String(settings.titleScopeSelector || ".torrentNameInfo");
-    producersListEditor.setValues(settings.producersList || []);
-    performersListEditor.setValues(settings.performersList || []);
+    studiosListEditor.setValues(settings.studiosList || []);
+    actorsListEditor.setValues(settings.actorsList || []);
     dimStringsEditor.setValues(settings.dimStrings || []);
     dimRowsEditor.setValues(settings.dimRows || []);
     cachedDismissedTitles = Array.isArray(settings.dismissedTitles) ? settings.dismissedTitles.slice() : [];
@@ -259,10 +259,10 @@ function createListEditor(prefix) {
   };
 }
 
-producersListEditor.onChange(() => {
+studiosListEditor.onChange(() => {
   saveListEdit();
 });
-performersListEditor.onChange(() => {
+actorsListEditor.onChange(() => {
   saveListEdit();
 });
 dimStringsEditor.onChange(() => {
@@ -361,8 +361,8 @@ function renderDismissedTitles() {
 
 function collectSettings(includePending) {
   if (includePending) {
-    producersListEditor.addPending();
-    performersListEditor.addPending();
+    studiosListEditor.addPending();
+    actorsListEditor.addPending();
     dimStringsEditor.addPending();
     dimRowsEditor.addPending();
   }
@@ -375,8 +375,8 @@ function collectSettings(includePending) {
     dimDatePattern: dimDatePatternInput.checked,
     removeDimRows: removeDimRowsInput.checked,
     titleScopeSelector: String(titleScopeSelectorInput.value || "").trim(),
-    producersList: producersListEditor.getValues(),
-    performersList: performersListEditor.getValues(),
+    studiosList: studiosListEditor.getValues(),
+    actorsList: actorsListEditor.getValues(),
     dimStrings: dimStringsEditor.getValues(),
     dimRows: dimRowsEditor.getValues(),
     dismissedTitles: cachedDismissedTitles,
@@ -393,6 +393,12 @@ async function persistSettings(_showStatus, includePending) {
 
 function mergeSettings(partial) {
   const merged = Object.assign({}, DEFAULT_SETTINGS, partial || {});
+  if (!Array.isArray(merged.studiosList) && Array.isArray(merged.producersList)) {
+    merged.studiosList = merged.producersList;
+  }
+  if (!Array.isArray(merged.actorsList) && Array.isArray(merged.performersList)) {
+    merged.actorsList = merged.performersList;
+  }
   if (Array.isArray(merged.urlPatterns)) {
     merged.urlPatterns = splitPatterns(merged.urlPatterns.join("\n"));
   } else {
@@ -404,8 +410,10 @@ function mergeSettings(partial) {
   merged.dimDatePattern = Boolean(merged.dimDatePattern);
   merged.removeDimRows = Boolean(merged.removeDimRows);
   merged.titleScopeSelector = String(merged.titleScopeSelector || ".torrentNameInfo").trim() || ".torrentNameInfo";
-  merged.producersList = dedupeList(merged.producersList);
-  merged.performersList = dedupeList(merged.performersList);
+  merged.studiosList = dedupeList(merged.studiosList);
+  merged.actorsList = dedupeList(merged.actorsList);
+  delete merged.producersList;
+  delete merged.performersList;
   merged.dimStrings = dedupeList(merged.dimStrings);
   merged.dimRows = dedupeList(merged.dimRows);
   merged.dismissedTitles = dedupeList(merged.dismissedTitles);

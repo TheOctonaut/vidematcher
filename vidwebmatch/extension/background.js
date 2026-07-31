@@ -6,8 +6,8 @@ const DEFAULT_SETTINGS = {
   scanVisibleText: true,
   scanScopedTitles: true,
   titleScopeSelector: ".torrentNameInfo",
-  producersList: [],
-  performersList: [],
+  studiosList: [],
+  actorsList: [],
   dimStrings: [],
   dimRows: [],
   dismissedTitles: [],
@@ -78,6 +78,12 @@ async function handleMessage(message, sender) {
 
 function mergeSettings(partial) {
   const merged = Object.assign({}, DEFAULT_SETTINGS, partial || {});
+  if (!Array.isArray(merged.studiosList) && Array.isArray(merged.producersList)) {
+    merged.studiosList = merged.producersList;
+  }
+  if (!Array.isArray(merged.actorsList) && Array.isArray(merged.performersList)) {
+    merged.actorsList = merged.performersList;
+  }
   merged.urlPatterns = normalizePatterns(merged.urlPatterns);
   merged.batchSize = clampInteger(merged.batchSize, 1, 500, DEFAULT_SETTINGS.batchSize);
   merged.debounceMs = clampInteger(merged.debounceMs, 50, 5000, DEFAULT_SETTINGS.debounceMs);
@@ -92,8 +98,10 @@ function mergeSettings(partial) {
   merged.scanScopedTitles = Boolean(merged.scanScopedTitles);
   merged.removeDimRows = Boolean(merged.removeDimRows);
   merged.dimDatePattern = Boolean(merged.dimDatePattern);
-  merged.producersList = normalizeStringList(merged.producersList);
-  merged.performersList = normalizeStringList(merged.performersList);
+  merged.studiosList = normalizeStringList(merged.studiosList);
+  merged.actorsList = normalizeStringList(merged.actorsList);
+  delete merged.producersList;
+  delete merged.performersList;
   merged.dimStrings = normalizeStringList(merged.dimStrings);
   merged.dimRows = normalizeStringList(merged.dimRows);
   merged.dismissedTitles = normalizeTitleList(merged.dismissedTitles);
