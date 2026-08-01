@@ -133,6 +133,26 @@ Status values:
 - `interrupted` — externally interrupted (for example Ctrl+C)
 - `aborted` — user declined confirmation prompt
 
+## Safe stop and pause
+
+The script watches for sentinel files in `TempDir`:
+
+- `vidrecompress.stop` — finish the current file, then stop and print the summary
+- `vidrecompress.pause` — pause between files until the file is removed
+
+Create the files with:
+
+```powershell
+New-Item -ItemType File -Path "C:\path\to\temp-encode\vidrecompress.stop" -Force | Out-Null
+New-Item -ItemType File -Path "C:\path\to\temp-encode\vidrecompress.pause" -Force | Out-Null
+```
+
+Remove the pause file to resume:
+
+```powershell
+Remove-Item "C:\path\to\temp-encode\vidrecompress.pause"
+```
+
 ## Exit codes
 
 | Code | Meaning |
