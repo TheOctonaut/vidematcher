@@ -596,13 +596,17 @@ if (-not (Test-Path -LiteralPath $OptionsFile -PathType Leaf)) {
     }
 }
 
-$fileOptions = $null
-if (Test-Path -LiteralPath $OptionsFile -PathType Leaf) {
+ $fileOptions = $null
+ $haveRequiredCliArgs = $PSBoundParameters.ContainsKey("StagingDir") -and $PSBoundParameters.ContainsKey("HandbrakeDir") -and $PSBoundParameters.ContainsKey("FinalDir")
+ if (Test-Path -LiteralPath $OptionsFile -PathType Leaf) {
     try {
         $rawOptions = Get-Content -LiteralPath $OptionsFile -Raw
         if (-not [string]::IsNullOrWhiteSpace($rawOptions)) {
             $fileOptions = $rawOptions | ConvertFrom-Json
         }
+    }
+    elseif ($haveRequiredCliArgs) {
+        $fileOptions = [PSCustomObject]@{}
     }
     catch {
         throw "Failed to read options file '$OptionsFile': $($_.Exception.Message)"

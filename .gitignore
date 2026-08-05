@@ -4,3 +4,6 @@ options.json
 *.log
 vidwebmatch/native-host/bin/
 vidwebmatch/native-host/obj/
+webui/.env
+webui/runtime-configs/
+webui/app/__pycache__/

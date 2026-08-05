@@ -1,0 +1,131 @@
+{
+  "tools": [
+    {
+      "key": "viddispatch",
+      "name": "viddispatch",
+      "script_path": "/workspace/viddispatch/viddispatch.ps7.ps1",
+      "options_file": "/scripts/viddispatch/options.json",
+      "destructive": true,
+      "switches": ["-DryRun", "-NoConfirm", "-SkipPick"],
+      "defaults": {
+        "StagingDir": "M:/p/done",
+        "HandbrakeDir": "M:/p/handbrake",
+        "FinalDir": "Z:/"
+      },
+      "string_params": [
+        { "arg": "-StagingDir", "config_key": "StagingDir" },
+        { "arg": "-HandbrakeDir", "config_key": "HandbrakeDir" },
+        { "arg": "-FinalDir", "config_key": "FinalDir" }
+      ],
+      "summary": "Run full pick, match, encode, and reconcile pipeline."
+    },
+    {
+      "key": "vidpicker",
+      "name": "vidpicker",
+      "script_path": "/workspace/vidpicker/vidpicker.ps7.ps1",
+      "options_file": "/scripts/vidpicker/options.json",
+      "destructive": true,
+      "switches": ["-DryRun", "-NoConfirm"],
+      "defaults": {
+        "SourceDir": "M:/p/handbrake",
+        "DestDir": "M:/p/done",
+        "Extensions": [".avi", ".mp4", ".mkv"]
+      },
+      "string_params": [
+        { "arg": "-SourceDir", "config_key": "SourceDir" },
+        { "arg": "-DestDir", "config_key": "DestDir" }
+      ],
+      "array_params": [
+        { "arg": "-Extensions", "config_key": "Extensions" }
+      ],
+      "summary": "Move candidate files to processing folder and clean source folders."
+    },
+    {
+      "key": "vidmatch",
+      "name": "vidmatch",
+      "script_path": "/workspace/vidmatch/vidmatch.ps7.ps1",
+      "options_file": "/scripts/vidmatch/options.json",
+      "destructive": false,
+      "switches": ["-NoRecurse", "-ShowRelativePaths"],
+      "defaults": {
+        "SourceDir": "M:/p/handbrake",
+        "TargetDir": "Z:/",
+        "CsvOutputPath": "M:/p/done/vidmatch.csv",
+        "SourceExtensions": [".avi", ".mp4", ".mkv"],
+        "TargetExtensions": [".avi", ".mp4", ".mkv"]
+      },
+      "string_params": [
+        { "arg": "-SourceDir", "config_key": "SourceDir" },
+        { "arg": "-TargetDir", "config_key": "TargetDir" },
+        { "arg": "-CsvOutputPath", "config_key": "CsvOutputPath" }
+      ],
+      "array_params": [
+        { "arg": "-SourceExtensions", "config_key": "SourceExtensions" },
+        { "arg": "-TargetExtensions", "config_key": "TargetExtensions" }
+      ],
+      "summary": "Compare basenames between source and target folders."
+    },
+    {
+      "key": "videncode",
+      "name": "videncode",
+      "script_path": "/workspace/videncode/videncode.ps7.ps1",
+      "options_file": "/scripts/videncode/options.json",
+      "destructive": true,
+      "switches": ["-DryRun", "-NoConfirm"],
+      "defaults": {
+        "SourceDir": "M:/p/handbrake",
+        "DestDir": "M:/p/done",
+        "InputFilesListFile": "M:/p/done/.videncode-input-files.txt",
+        "PresetName": "My Custom Preset",
+        "PresetImportFile": "M:/p/handbrake/presets.json",
+        "HandBrakeCliPath": "HandBrakeCLI",
+        "OutputExtension": ".mp4",
+        "SourceExtensions": [".avi", ".mp4", ".mkv"]
+      },
+      "string_params": [
+        { "arg": "-SourceDir", "config_key": "SourceDir" },
+        { "arg": "-DestDir", "config_key": "DestDir" },
+        { "arg": "-InputFilesListFile", "config_key": "InputFilesListFile" },
+        { "arg": "-PresetName", "config_key": "PresetName" },
+        { "arg": "-PresetImportFile", "config_key": "PresetImportFile" },
+        { "arg": "-HandBrakeCliPath", "config_key": "HandBrakeCliPath" },
+        { "arg": "-OutputExtension", "config_key": "OutputExtension" }
+      ],
+      "array_params": [
+        { "arg": "-SourceExtensions", "config_key": "SourceExtensions" }
+      ],
+      "summary": "Encode selected files with HandBrakeCLI and move outputs."
+    },
+    {
+      "key": "vidrecompress",
+      "name": "vidrecompress",
+      "script_path": "/workspace/vidrecompress/vidrecompress.ps7.ps1",
+      "options_file": "/scripts/vidrecompress/options.json",
+      "destructive": true,
+      "switches": ["-Recurse", "-DryRun", "-NoConfirm", "-VerboseConsole"],
+      "defaults": {
+        "SourceDir": "M:/p/handbrake",
+        "TempDir": "M:/p/done/.videncode-temp",
+        "PresetName": "My Custom Preset",
+        "PresetImportFile": "M:/p/handbrake/presets.json",
+        "HandBrakeCliPath": "HandBrakeCLI",
+        "OutputExtension": ".mp4",
+        "ProcessOrder": "size_desc",
+        "SourceExtensions": [".avi"]
+      },
+      "string_params": [
+        { "arg": "-SourceDir", "config_key": "SourceDir" },
+        { "arg": "-TempDir", "config_key": "TempDir" },
+        { "arg": "-PresetName", "config_key": "PresetName" },
+        { "arg": "-PresetImportFile", "config_key": "PresetImportFile" },
+        { "arg": "-HandBrakeCliPath", "config_key": "HandBrakeCliPath" },
+        { "arg": "-OutputExtension", "config_key": "OutputExtension" },
+        { "arg": "-ProcessOrder", "config_key": "ProcessOrder" }
+      ],
+      "array_params": [
+        { "arg": "-SourceExtensions", "config_key": "SourceExtensions" }
+      ],
+      "summary": "Re-encode existing files in place when compressed output is smaller."
+    }
+  ]
+}
