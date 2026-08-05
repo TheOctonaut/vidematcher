@@ -10,12 +10,16 @@
       "defaults": {
         "StagingDir": "M:/p/done",
         "HandbrakeDir": "M:/p/handbrake",
-        "FinalDir": "Z:/"
+        "FinalDir": "Z:/",
+        "PresetName": "My Custom Preset",
+        "HandBrakeCliPath": "HandBrakeCLI"
       },
       "string_params": [
         { "arg": "-StagingDir", "config_key": "StagingDir" },
         { "arg": "-HandbrakeDir", "config_key": "HandbrakeDir" },
-        { "arg": "-FinalDir", "config_key": "FinalDir" }
+        { "arg": "-FinalDir", "config_key": "FinalDir" },
+        { "arg": "-PresetName", "config_key": "PresetName" },
+        { "arg": "-HandBrakeCliPath", "config_key": "HandBrakeCliPath" }
       ],
       "summary": "Run full pick, match, encode, and reconcile pipeline."
     },
@@ -77,7 +81,6 @@
         "DestDir": "M:/p/done",
         "InputFilesListFile": "M:/p/done/.videncode-input-files.txt",
         "PresetName": "My Custom Preset",
-        "PresetImportFile": "M:/p/handbrake/presets.json",
         "HandBrakeCliPath": "HandBrakeCLI",
         "OutputExtension": ".mp4",
         "SourceExtensions": [".avi", ".mp4", ".mkv"]
@@ -87,7 +90,6 @@
         { "arg": "-DestDir", "config_key": "DestDir" },
         { "arg": "-InputFilesListFile", "config_key": "InputFilesListFile" },
         { "arg": "-PresetName", "config_key": "PresetName" },
-        { "arg": "-PresetImportFile", "config_key": "PresetImportFile" },
         { "arg": "-HandBrakeCliPath", "config_key": "HandBrakeCliPath" },
         { "arg": "-OutputExtension", "config_key": "OutputExtension" }
       ],

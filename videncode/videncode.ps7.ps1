@@ -33,7 +33,10 @@ param(
     [switch]$DryRun,
 
     [Parameter(Mandatory = $false)]
-    [switch]$NoConfirm
+    [switch]$NoConfirm,
+
+    [Parameter(Mandatory = $false)]
+    [switch]$UseCliOnly
 )
 
 $ErrorActionPreference = "Stop"
@@ -56,7 +59,7 @@ $exampleOptionsFile = Join-Path $scriptRoot $exampleOptionsFileName
 
 function Get-OptionValue {
     param(
-        [Parameter(Mandatory = $true)][object]$Options,
+        [Parameter(Mandatory = $false)][AllowNull()][object]$Options,
         [Parameter(Mandatory = $true)][string]$Name
     )
 
@@ -144,7 +147,7 @@ $defaults = [PSCustomObject]@{
     SourceExtensions = @(".avi", ".mp4", ".mkv")
 }
 
-if (-not (Test-Path -LiteralPath $OptionsFile -PathType Leaf)) {
+if (-not $UseCliOnly -and -not (Test-Path -LiteralPath $OptionsFile -PathType Leaf)) {
     if ($NoConfirm -and -not $optionsFileExplicit) {
         Write-Host "Options file not found: $OptionsFile (continuing without it)"
     }
@@ -181,7 +184,7 @@ if (-not (Test-Path -LiteralPath $OptionsFile -PathType Leaf)) {
 }
 
 $fileOptions = $null
-if (Test-Path -LiteralPath $OptionsFile -PathType Leaf) {
+if (-not $UseCliOnly -and (Test-Path -LiteralPath $OptionsFile -PathType Leaf)) {
     try {
         $rawOptions = Get-Content -LiteralPath $OptionsFile -Raw
         if (-not [string]::IsNullOrWhiteSpace($rawOptions)) {
@@ -194,67 +197,74 @@ if (Test-Path -LiteralPath $OptionsFile -PathType Leaf) {
 }
 
 $resolvedSourceDir = if ($PSBoundParameters.ContainsKey("SourceDir")) {
-    $SourceDir
-}
-else {
+    Normalize-OptionalString $SourceDir
+} elseif ($UseCliOnly) {
+    $null
+} else {
     Normalize-OptionalString (Get-OptionValue -Options $fileOptions -Name "SourceDir")
 }
 
 $resolvedDestDir = if ($PSBoundParameters.ContainsKey("DestDir")) {
-    $DestDir
-}
-else {
+    Normalize-OptionalString $DestDir
+} elseif ($UseCliOnly) {
+    $null
+} else {
     Normalize-OptionalString (Get-OptionValue -Options $fileOptions -Name "DestDir")
 }
 
 $resolvedPresetName = if ($PSBoundParameters.ContainsKey("PresetName")) {
-    $PresetName
-}
-else {
+    Normalize-OptionalString $PresetName
+} elseif ($UseCliOnly) {
+    $null
+} else {
     Normalize-OptionalString (Get-OptionValue -Options $fileOptions -Name "PresetName")
 }
 
 $resolvedPresetImportFile = if ($PSBoundParameters.ContainsKey("PresetImportFile")) {
-    $PresetImportFile
-}
-else {
+    Normalize-OptionalString $PresetImportFile
+} elseif ($UseCliOnly) {
+    $null
+} else {
     Normalize-OptionalString (Get-OptionValue -Options $fileOptions -Name "PresetImportFile")
 }
 
 $resolvedHandBrakeCliPath = if ($PSBoundParameters.ContainsKey("HandBrakeCliPath")) {
     Normalize-OptionalString $HandBrakeCliPath
-}
-else {
+} elseif ($UseCliOnly) {
+    $defaults.HandBrakeCliPath
+} else {
     $v = Normalize-OptionalString (Get-OptionValue -Options $fileOptions -Name "HandBrakeCliPath")
     if ($null -ne $v) { $v } else { $defaults.HandBrakeCliPath }
 }
 
 $resolvedOutputExtension = if ($PSBoundParameters.ContainsKey("OutputExtension")) {
     Normalize-Extension $OutputExtension
-}
-else {
+} elseif ($UseCliOnly) {
+    $defaults.OutputExtension
+} else {
     $v = Normalize-Extension (Get-OptionValue -Options $fileOptions -Name "OutputExtension")
     if ($null -ne $v) { $v } else { $defaults.OutputExtension }
 }
 
 $resolvedSourceExtensions = if ($PSBoundParameters.ContainsKey("SourceExtensions")) {
     ConvertTo-NormalizedExtensionArray $SourceExtensions
-}
-else {
+} elseif ($UseCliOnly) {
+    $defaults.SourceExtensions
+} else {
     $v = ConvertTo-NormalizedExtensionArray (Get-OptionValue -Options $fileOptions -Name "SourceExtensions")
     if ($null -ne $v -and $v.Count -gt 0) { $v } else { $defaults.SourceExtensions }
 }
 
 if ([string]::IsNullOrWhiteSpace($resolvedSourceDir)) {
-    throw "SourceDir is required. Provide -SourceDir or set SourceDir in options.json."
+    throw "SourceDir is required. Provide -SourceDir on the command line."
 }
 
 if ([string]::IsNullOrWhiteSpace($resolvedDestDir)) {
-    throw "DestDir is required. Provide -DestDir or set DestDir in options.json."
+    throw "DestDir is required. Provide -DestDir on the command line."
 }
 
 if ([string]::IsNullOrWhiteSpace($resolvedPresetName)) {
-    throw "PresetName is required. Provide -PresetName or set PresetName in options.json."
+    throw "PresetName is required. Provide -PresetName on the command line."
 }
 
 if (-not (Test-Path -LiteralPath $resolvedSourceDir -PathType Container)) {
@@ -289,11 +299,13 @@ if ($null -ne $resolvedPresetImportFile) {
 }
 
 if (-not [System.IO.Path]::IsPathRooted($resolvedHandBrakeCliPath) -and $resolvedHandBrakeCliPath -notmatch '[\\/]') {
-    $hbCommand = Get-Command $resolvedHandBrakeCliPath -ErrorAction SilentlyContinue
-    if ($null -eq $hbCommand) {
-        throw "HandBrakeCLI not found in PATH: $resolvedHandBrakeCliPath"
+    if (-not $UseCliOnly) {
+        $hbCommand = Get-Command $resolvedHandBrakeCliPath -ErrorAction SilentlyContinue
+        if ($null -eq $hbCommand) {
+            throw "HandBrakeCLI not found in PATH: $resolvedHandBrakeCliPath"
+        }
+        $resolvedHandBrakeCliPath = $hbCommand.Source
     }
-    $resolvedHandBrakeCliPath = $hbCommand.Source
 }
 elseif (-not (Test-Path -LiteralPath $resolvedHandBrakeCliPath -PathType Leaf)) {
     throw "HandBrakeCLI path does not exist: $resolvedHandBrakeCliPath"

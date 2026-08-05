@@ -41,10 +41,36 @@ def healthz() -> dict:
     }
 
 
+@app.get("/runs/{run_id}/status")
+def run_status(run_id: int) -> dict:
+    run = get_run_by_id(run_id)
+    if run is None:
+        return {"found": False}
+    return {
+        "found": True,
+        "id": run["id"],
+        "status": run["status"],
+        "return_code": run["return_code"],
+        "summary_line": run["summary_line"],
+        "tool_key": run["tool_key"],
+        "started_at": run["started_at"],
+        "finished_at": run["finished_at"],
+    }
+
+
+@app.get("/runs/{run_id}/payload")
+def run_payload(run_id: int) -> dict:
+    run = get_run_by_id(run_id)
+    if run is None:
+        return {"found": False}
+    return {"found": True, "run": run}
+
+
 @app.get("/")
 def index(
     request: Request,
     job_id: Optional[str] = Query(default=None),
+    run_id: Optional[int] = Query(default=None),
     tool_key: Optional[str] = Query(default=None),
     config_saved: bool = Query(default=False),
     config_imported: bool = Query(default=False),
@@ -61,13 +87,28 @@ def index(
             job_status = job.get_status(refresh=True)
             if job.is_finished:
                 job_data = job.result
+                if job_data and isinstance(job_data, dict):
+                    stored_run = get_run_by_id(job_data.get("run_id", -1))
+                    if stored_run is not None:
+                        job_data = stored_run
             elif job.is_failed:
                 if job.exc_info:
                     error = job.exc_info
                 else:
                     error = "Job failed."
         except NoSuchJobError:
-            error = f"Job not found: {job_id}"
+            # Job expired from Redis; try to look up the run by run_id if available
+            if run_id:
+                stored_run = get_run_by_id(run_id)
+                if stored_run:
+                    job_data = stored_run
+            if not job_data:
+                error = f"Job not found: {job_id}"
+    
+    if run_id and not job_data:
+        stored_run = get_run_by_id(run_id)
+        if stored_run:
+            job_data = stored_run
 
     tools = load_tools()
     selected_tool = get_tool_by_key(tool_key or settings.default_tool_key)

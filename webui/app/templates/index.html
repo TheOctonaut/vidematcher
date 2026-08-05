@@ -102,6 +102,9 @@
       pre { background: #111; color: #ddd; padding: 0.9rem; overflow: auto; border-radius: 6px; font-size: 0.82rem; max-height: 400px; }
       .muted { color: #666; }
       hr { border: none; border-top: 1px solid #e0e0e0; margin: 1rem 0; }
+      .live-indicator { display: inline-flex; align-items: center; gap: 0.35rem; font-size: 0.8rem; color: #666; }
+      .live-dot { width: 0.5rem; height: 0.5rem; border-radius: 999px; background: #7aab90; animation: pulse 1.5s infinite; }
+      @keyframes pulse { 0%, 100% { opacity: 0.35; } 50% { opacity: 1; } }
     </style>
   </head>
   <body>
@@ -297,11 +300,14 @@
 
     <!-- Job result -->
     {% if job_id %}
-    <div class="result-panel">
+    <div class="result-panel" id="job-result-panel">
       <h2>Last run result</h2>
+      {% if job_id and not job_data %}
+      <span class="live-indicator"><span class="live-dot"></span>live updates</span>
+      {% endif %}
       <div class="result-meta">
         <span><strong>Job:</strong> <code>{{ job_id }}</code></span>
-        <span><strong>Status:</strong> {{ job_status }}</span>
+        <span><strong>Status:</strong> <span id="job-status">{{ job_status }}</span></span>
         {% if job_data %}
           <span><strong>Tool:</strong> {{ job_data.tool_key }}</span>
           <span><strong>Return code:</strong> {{ job_data.return_code }}</span>
@@ -330,7 +336,7 @@
           Command: <code>{{ " ".join(job_data.command) }}</code>
         </p>
       {% else %}
-        <p class="muted">Job is queued or running — refresh to update status.</p>
+        <p class="muted" id="job-live-message">Job is queued or running — updating live.</p>
       {% endif %}
     </div>
     {% endif %}
@@ -366,4 +372,45 @@
     </div>
 
   </body>
+  <script>
+    (function () {
+      const jobId = {{ job_id|tojson }};
+      const runId = {{ job_data.id if job_data else None|tojson }};
+      if (!jobId && !runId) return;
+      
+      const poll = async () => {
+        try {
+          const statusEl = document.getElementById('job-status');
+          const res = await fetch(window.location.href, { cache: 'no-store' });
+          if (!res.ok) return;
+          const html = await res.text();
+          const parser = new DOMParser();
+          const doc = parser.parseFromString(html, 'text/html');
+          const newStatusEl = doc.getElementById('job-status');
+          if (statusEl && newStatusEl) statusEl.textContent = newStatusEl.textContent;
+          const newPanel = doc.getElementById('job-result-panel');
+          if (newPanel) {
+            const currentPanel = document.getElementById('job-result-panel');
+            if (currentPanel) currentPanel.replaceWith(newPanel);
+          }
+          const statusText = newStatusEl ? newStatusEl.textContent.trim() : '';
+          
+          // If job finished and we have run_id, switch to run_id polling
+          if ((statusText === 'finished' || statusText === 'failed') && runId && jobId && !window.location.search.includes('run_id')) {
+            const newUrl = window.location.search.replace(/job_id=[^&]*/, `run_id=${runId}`);
+            window.history.replaceState({}, '', window.location.pathname + newUrl);
+          }
+          
+          if (statusText === 'queued' || statusText === 'started' || statusText === 'running') {
+            setTimeout(poll, 2500);
+            return;
+          }
+          setTimeout(poll, 2500);
+        } catch (_) {
+          setTimeout(poll, 4000);
+        }
+      };
+      setTimeout(poll, 1500);
+    })();
+  </script>
 </html>

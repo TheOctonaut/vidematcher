@@ -48,7 +48,7 @@ function Get-NormalizedBaseName {
 
 function Get-OptionValue {
     param(
-        [Parameter(Mandatory = $true)][object]$Options,
+        [Parameter(Mandatory = $false)][AllowNull()][object]$Options,
         [Parameter(Mandatory = $true)][string]$Name
     )
 
@@ -214,15 +214,17 @@ if (-not (Test-Path -LiteralPath $OptionsFile -PathType Leaf)) {
 }
 
 $fileOptions = $null
-if (Test-Path -LiteralPath $OptionsFile -PathType Leaf) {
-    try {
-        $rawOptions = Get-Content -LiteralPath $OptionsFile -Raw
-        if (-not [string]::IsNullOrWhiteSpace($rawOptions)) {
-            $fileOptions = $rawOptions | ConvertFrom-Json
+if (-not $UseCliOnly) {
+    if (Test-Path -LiteralPath $OptionsFile -PathType Leaf) {
+        try {
+            $rawOptions = Get-Content -LiteralPath $OptionsFile -Raw
+            if (-not [string]::IsNullOrWhiteSpace($rawOptions)) {
+                $fileOptions = $rawOptions | ConvertFrom-Json
+            }
         }
-    }
-    catch {
-        throw "Failed to read options file '$OptionsFile': $($_.Exception.Message)"
+        catch {
+            throw "Failed to read options file '$OptionsFile': $($_.Exception.Message)"
+        }
     }
 }
 

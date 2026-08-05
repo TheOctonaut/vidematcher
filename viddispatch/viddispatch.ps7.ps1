@@ -21,6 +21,12 @@ param(
     [string]$VidencodeScript,
 
     [Parameter(Mandatory = $false)]
+    [string]$PresetName,
+
+    [Parameter(Mandatory = $false)]
+    [string]$HandBrakeCliPath,
+
+    [Parameter(Mandatory = $false)]
     [switch]$SkipPick,
 
     [Parameter(Mandatory = $false)]
@@ -50,7 +56,33 @@ if ([string]::IsNullOrWhiteSpace($OptionsFile)) {
     $OptionsFile = Join-Path $scriptRoot "options.json"
 }
 
+$UseCliOnly = $true
+
 $exampleOptionsFileName = "options.json.example"
+$pathMountMap = @()
+try {
+    $envMountMap = $env:PATH_MOUNT_MAP
+    if (-not [string]::IsNullOrWhiteSpace($envMountMap)) {
+        $decoded = $envMountMap | ConvertFrom-Json
+        if ($decoded -is [System.Array]) {
+            foreach ($entry in $decoded) {
+                if ($null -ne $entry -and $entry.PSObject.Properties.Name -contains "host" -and $entry.PSObject.Properties.Name -contains "container") {
+                    $host = ([string]$entry.host).Trim()
+                    $container = ([string]$entry.container).Trim()
+                    if (-not [string]::IsNullOrWhiteSpace($host) -and -not [string]::IsNullOrWhiteSpace($container)) {
+                        $pathMountMap += [PSCustomObject]@{
+                            host_norm = $host.Replace('\', '/').TrimEnd('/')
+                            container = $container
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+catch {
+    $pathMountMap = @()
+}
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -214,6 +246,25 @@ function Escape-Argument {
     return '"' + $Value.Replace('"', '""') + '"'
 }
 
+function Convert-HostPathToContainerPath {
+    param([Parameter(Mandatory = $true)][string]$PathValue)
+
+    if ([string]::IsNullOrWhiteSpace($PathValue)) {
+        return $PathValue
+    }
+
+    $normalized = $PathValue.Replace('\', '/')
+    foreach ($mapping in $pathMountMap) {
+        $hostRoot = $mapping.host_norm
+        $containerRoot = $mapping.container.TrimEnd('/')
+        if ($normalized -eq $hostRoot -or $normalized.StartsWith($hostRoot + '/')) {
+            return $normalized.Replace($hostRoot, $containerRoot, 1)
+        }
+    }
+
+    return $PathValue
+}
+
 function Get-PowerShellExe {
     $pwsh = Get-Command "pwsh" -ErrorAction SilentlyContinue
     if ($null -eq $pwsh) {
@@ -243,6 +294,20 @@ function Normalize-OptionalString {
 function Get-NormalizedBaseName {
     param([Parameter(Mandatory = $true)][string]$Name)
     return $Name.ToLowerInvariant()
+}
+
+function Convert-HostPathToContainerPath {
+    param([Parameter(Mandatory = $true)][string]$PathValue)
+    $normalized = $PathValue.Replace("\", "/")
+    foreach ($mapping in @(
+        @{ host = "M:/p"; container = "/p" },
+        @{ host = "Z:/"; container = "/z" }
+    )) {
+        if ($normalized -eq $mapping.host -or $normalized.StartsWith($mapping.host + "/")) {
+            return $normalized.Replace($mapping.host, $mapping.container, 1)
+        }
+    }
+    return $normalized
 }
 
 function Invoke-ToolScript {
@@ -627,12 +692,12 @@ if (-not (Test-Path -LiteralPath $OptionsFile -PathType Leaf)) {
             $fileOptions = $rawOptions | ConvertFrom-Json
         }
     }
-    elseif ($haveRequiredCliArgs) {
-        $fileOptions = [PSCustomObject]@{}
-    }
     catch {
         throw "Failed to read options file '$OptionsFile': $($_.Exception.Message)"
     }
+}
+elseif ($haveRequiredCliArgs) {
+    $fileOptions = [PSCustomObject]@{}
 }
 
 # ---------------------------------------------------------------------------
@@ -675,6 +740,18 @@ $resolvedVidencodeScript = if ($PSBoundParameters.ContainsKey("VidencodeScript")
     Normalize-OptionalString (Get-OptionValue -Options $fileOptions -Name "VidencodeScript")
 }
 
+$resolvedPresetName = if ($PSBoundParameters.ContainsKey("PresetName")) {
+    Normalize-OptionalString $PresetName
+} else {
+    Normalize-OptionalString (Get-OptionValue -Options $fileOptions -Name "PresetName")
+}
+
+$resolvedHandBrakeCliPath = if ($PSBoundParameters.ContainsKey("HandBrakeCliPath")) {
+    Normalize-OptionalString $HandBrakeCliPath
+} else {
+    Normalize-OptionalString (Get-OptionValue -Options $fileOptions -Name "HandBrakeCliPath")
+}
+
 # Default tool script paths: siblings of the dispatcher's parent folder
 $repoRoot = Split-Path -Parent $scriptRoot
 
@@ -703,6 +780,12 @@ if ([string]::IsNullOrWhiteSpace($resolvedHandbrakeDir)) {
 if ([string]::IsNullOrWhiteSpace($resolvedFinalDir)) {
     throw "FinalDir is required. Provide -FinalDir or set it in options.json."
 }
+if ([string]::IsNullOrWhiteSpace($resolvedPresetName)) {
+    throw "PresetName is required. Provide -PresetName or set it in options.json."
+}
+if ([string]::IsNullOrWhiteSpace($resolvedHandBrakeCliPath)) {
+    $resolvedHandBrakeCliPath = "HandBrakeCLI"
+}
 
 foreach ($entry in @(
     @{ Name = "VidpickerScript"; Path = $resolvedVidpickerScript },
@@ -713,6 +796,10 @@ foreach ($entry in @(
         throw "$($entry.Name) not found: $($entry.Path)"
     }
 }
+
+ $resolvedStagingDir = Convert-HostPathToContainerPath -PathValue $resolvedStagingDir
+ $resolvedHandbrakeDir = Convert-HostPathToContainerPath -PathValue $resolvedHandbrakeDir
+ $resolvedFinalDir = Convert-HostPathToContainerPath -PathValue $resolvedFinalDir
 
 if (-not $SkipPick -and -not (Test-Path -LiteralPath $resolvedStagingDir -PathType Container)) {
     throw "StagingDir does not exist: $resolvedStagingDir"
@@ -767,7 +854,7 @@ $dispatchMoveDeferred = 0
 $dispatchPendingMoved = 0
 
 # ---------------------------------------------------------------------------
-# PREFLIGHT: validate encode dependencies before any destructive steps
+# PREFLIGHT: validate encode command shape before any destructive steps
 # ---------------------------------------------------------------------------
 
 $preflightArgs = @(
@@ -775,17 +862,26 @@ $preflightArgs = @(
     (Escape-Argument -Value $resolvedVidencodeScript),
     "-SourceDir", (Escape-Argument -Value $resolvedHandbrakeDir),
     "-DestDir",   (Escape-Argument -Value $resolvedFinalDir),
-    "-InputFiles", (Escape-Argument -Value "__viddispatch_preflight__.avi"),
+    "-PresetName", (Escape-Argument -Value $resolvedPresetName),
     "-DryRun",
-    "-NoConfirm"
+    "-NoConfirm",
+    "-UseCliOnly"
 )
 
 $preflightWatch = Start-StepTimer
 $preflightResult = Invoke-ToolScript -Label "preflight: videncode" -Exe $psExe -Arguments $preflightArgs
 $preflightSeconds = Stop-StepTimer -Timer $preflightWatch
 if ($preflightResult.ExitCode -ne 0) {
-    Show-StepResult -Step "Preflight" -Result "FAIL" -Detail "videncode dependency/config check failed" -Seconds $preflightSeconds
-    Write-DispatchDetail -Warning -AlwaysConsole -Message "Preflight failed (videncode dependencies/config). Stopping before file moves."
+    Show-StepResult -Step "Preflight" -Result "FAIL" -Detail ("videncode exited {0}" -f $preflightResult.ExitCode) -Seconds $preflightSeconds
+    Write-DispatchDetail -Warning -AlwaysConsole -Message "Preflight failed; checking videncode stdout for the real error."
+    if (-not [string]::IsNullOrWhiteSpace($preflightResult.Stdout)) {
+        $flatStdout = ($preflightResult.Stdout -replace "\r?\n", [Environment]::NewLine)
+        Write-DispatchDetail -AlwaysConsole -Message $flatStdout
+    }
+    if (-not [string]::IsNullOrWhiteSpace($preflightResult.Stderr)) {
+        $flatStderr = ($preflightResult.Stderr -replace "\r?\n", [Environment]::NewLine)
+        Write-DispatchDetail -Warning -AlwaysConsole -Message $flatStderr
+    }
     $pipelineWatch.Stop()
     Show-FinalScorecard -Status "failed" -TotalSeconds $pipelineWatch.Elapsed.TotalSeconds -Picked $dispatchPickedCount -Unmatched 0 -Encoded $dispatchEncoded -EncodeFailed $dispatchEncodeFailed -Moved $dispatchMoved -MoveFailed $dispatchMoveFailed -ReconcileInspected 0 -ReconcileReplacedInflated 0 -ReconcileDeletedSmaller 0 -ReconcileKeptEqual 0 -ReconcileErrors 0
     Show-StepProgress -Percent 100 -Status "Failed"
@@ -793,7 +889,7 @@ if ($preflightResult.ExitCode -ne 0) {
     Write-Host "SUMMARY|tool=viddispatch|status=failed|dry_run=$dryRunFlag|skip_pick=$skipPickFlag|note=preflight_videncode_failed"
     exit 1
 }
-Show-StepResult -Step "Preflight" -Result "OK" -Detail "encode dependencies validated" -Seconds $preflightSeconds
+Show-StepResult -Step "Preflight" -Result "OK" -Detail "encode command accepted" -Seconds $preflightSeconds
 Show-StepProgress -Percent 20 -Status "Preflight complete"
 
 # ---------------------------------------------------------------------------
@@ -807,7 +903,8 @@ if (-not $SkipPick) {
         (Escape-Argument -Value $resolvedVidpickerScript),
         "-SourceDir", (Escape-Argument -Value $resolvedStagingDir),
         "-DestDir",   (Escape-Argument -Value $resolvedHandbrakeDir),
-        "-NoConfirm"
+        "-NoConfirm",
+        "-UseCliOnly"
     )
     if ($DryRun) { $pickerArgs += "-DryRun" }
 
@@ -816,6 +913,12 @@ if (-not $SkipPick) {
 
     if ($pickerResult.ExitCode -ne 0) {
         Show-StepResult -Step "Pick" -Result "FAIL" -Detail ("vidpicker exited {0}" -f $pickerResult.ExitCode) -Seconds $pickSeconds
+        if (-not [string]::IsNullOrWhiteSpace($pickerResult.Stdout)) {
+            Write-DispatchDetail -Warning -AlwaysConsole -Message ($pickerResult.Stdout -replace "\r?\n", [Environment]::NewLine)
+        }
+        if (-not [string]::IsNullOrWhiteSpace($pickerResult.Stderr)) {
+            Write-DispatchDetail -Warning -AlwaysConsole -Message ($pickerResult.Stderr -replace "\r?\n", [Environment]::NewLine)
+        }
         $pipelineWatch.Stop()
         Show-FinalScorecard -Status "failed" -TotalSeconds $pipelineWatch.Elapsed.TotalSeconds -Picked $dispatchPickedCount -Unmatched 0 -Encoded $dispatchEncoded -EncodeFailed $dispatchEncodeFailed -Moved $dispatchMoved -MoveFailed $dispatchMoveFailed -ReconcileInspected 0 -ReconcileReplacedInflated 0 -ReconcileDeletedSmaller 0 -ReconcileKeptEqual 0 -ReconcileErrors 0
         Show-StepProgress -Percent 100 -Status "Failed"
@@ -855,7 +958,8 @@ try {
         (Escape-Argument -Value $resolvedVidmatchScript),
         "-SourceDir", (Escape-Argument -Value $resolvedHandbrakeDir),
         "-TargetDir", (Escape-Argument -Value $resolvedFinalDir),
-        "-CsvOutputPath", (Escape-Argument -Value $tempCsvPath)
+        "-CsvOutputPath", (Escape-Argument -Value $tempCsvPath),
+        "-UseCliOnly"
     )
 
     $matchResult = Invoke-ToolScript -Label "vidmatch" -Exe $psExe -Arguments $matchArgs
@@ -863,6 +967,12 @@ try {
 
     if ($matchResult.ExitCode -ne 0) {
         Show-StepResult -Step "Match" -Result "FAIL" -Detail ("vidmatch exited {0}" -f $matchResult.ExitCode) -Seconds $matchSeconds
+        if (-not [string]::IsNullOrWhiteSpace($matchResult.Stdout)) {
+            Write-DispatchDetail -Warning -AlwaysConsole -Message ($matchResult.Stdout -replace "\r?\n", [Environment]::NewLine)
+        }
+        if (-not [string]::IsNullOrWhiteSpace($matchResult.Stderr)) {
+            Write-DispatchDetail -Warning -AlwaysConsole -Message ($matchResult.Stderr -replace "\r?\n", [Environment]::NewLine)
+        }
         $pipelineWatch.Stop()
         Show-FinalScorecard -Status "failed" -TotalSeconds $pipelineWatch.Elapsed.TotalSeconds -Picked $dispatchPickedCount -Unmatched $dispatchUnmatchedCount -Encoded $dispatchEncoded -EncodeFailed $dispatchEncodeFailed -Moved $dispatchMoved -MoveFailed $dispatchMoveFailed -ReconcileInspected 0 -ReconcileReplacedInflated 0 -ReconcileDeletedSmaller 0 -ReconcileKeptEqual 0 -ReconcileErrors 0
         Show-StepProgress -Percent 100 -Status "Failed"
@@ -903,7 +1013,10 @@ try {
             (Escape-Argument -Value $resolvedVidencodeScript),
             "-SourceDir", (Escape-Argument -Value $resolvedHandbrakeDir),
             "-DestDir",   (Escape-Argument -Value $resolvedFinalDir),
-            "-InputFilesListFile", (Escape-Argument -Value $tempInputListPath)
+            "-PresetName", (Escape-Argument -Value $resolvedPresetName),
+            "-HandBrakeCliPath", (Escape-Argument -Value $resolvedHandBrakeCliPath),
+            "-InputFilesListFile", (Escape-Argument -Value $tempInputListPath),
+            "-UseCliOnly"
         )
         Set-Content -LiteralPath $tempInputListPath -Value $inputFilesForEncode -Encoding UTF8
         Write-DebugLog ("encode input transport=list_file count={0}" -f $inputFilesForEncode.Count)
@@ -1018,6 +1131,12 @@ try {
                 "videncode exited $encodeExitCodeText"
             }
             Show-StepResult -Step "Encode" -Result "FAIL" -Detail $encodeFailDetail -Seconds $encodeSeconds
+            if (-not [string]::IsNullOrWhiteSpace($encodeResult.Stdout)) {
+                Write-DispatchDetail -Warning -AlwaysConsole -Message ($encodeResult.Stdout -replace "\r?\n", [Environment]::NewLine)
+            }
+            if (-not [string]::IsNullOrWhiteSpace($encodeResult.Stderr)) {
+                Write-DispatchDetail -Warning -AlwaysConsole -Message ($encodeResult.Stderr -replace "\r?\n", [Environment]::NewLine)
+            }
             $pipelineWatch.Stop()
             Show-FinalScorecard -Status "failed" -TotalSeconds $pipelineWatch.Elapsed.TotalSeconds -Picked $dispatchPickedCount -Unmatched $dispatchUnmatchedCount -Encoded $dispatchEncoded -EncodeFailed $dispatchEncodeFailed -Moved $dispatchMoved -MoveFailed $dispatchMoveFailed -ReconcileInspected 0 -ReconcileReplacedInflated 0 -ReconcileDeletedSmaller 0 -ReconcileKeptEqual 0 -ReconcileErrors 0
             Show-StepProgress -Percent 100 -Status "Failed"

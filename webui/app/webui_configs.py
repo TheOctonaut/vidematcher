@@ -40,7 +40,7 @@ def _normalize_loaded_config(tool: dict[str, Any], raw: dict[str, Any]) -> dict[
 
 
 def _builtin_defaults(tool_key: str) -> dict[str, Any]:
-    if tool_key in {"videncode", "vidrecompress"}:
+    if tool_key in {"videncode", "vidrecompress", "viddispatch"}:
         return {"HandBrakeCliPath": "HandBrakeCLI", "OutputExtension": ".mp4"}
     return {}
 
