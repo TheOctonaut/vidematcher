@@ -1,5 +1,5 @@
 {
   "SourceDir": "C:/path/to/source",
   "DestDir": "C:/path/to/dest",
-  "Extensions": [".avi", ".mp4"]
+  "Extensions": [".avi", ".mp4", ".mkv"]
 }
