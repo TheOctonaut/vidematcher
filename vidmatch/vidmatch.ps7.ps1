@@ -21,7 +21,16 @@ param(
     [string[]]$SourceExtensions,
 
     [Parameter(Mandatory = $false)]
-    [string[]]$TargetExtensions
+    [string[]]$TargetExtensions,
+
+    [Parameter(Mandatory = $false)]
+    [switch]$VerboseMatches,
+
+    [Parameter(Mandatory = $false)]
+    [switch]$DeleteMatches,
+
+    [Parameter(Mandatory = $false)]
+    [switch]$UseCliOnly
 )
 
 $ErrorActionPreference = "Stop"
@@ -48,7 +57,7 @@ function Get-NormalizedBaseName {
 
 function Get-OptionValue {
     param(
-        [Parameter(Mandatory = $true)][object]$Options,
+        [Parameter(Mandatory = $false)][AllowNull()][object]$Options,
         [Parameter(Mandatory = $true)][string]$Name
     )
 
@@ -144,11 +153,13 @@ $defaults = [PSCustomObject]@{
     CsvOutputPath = $null
     SourceExtensions = @(".avi", ".mp4")
     TargetExtensions = @(".avi", ".mp4")
+    VerboseMatches = $false
+    DeleteMatches = $false
 }
 
 $exampleOptionsFile = Join-Path $scriptRoot $exampleOptionsFileName
 
-if (-not (Test-Path -LiteralPath $OptionsFile -PathType Leaf)) {
+if (-not $UseCliOnly -and -not (Test-Path -LiteralPath $OptionsFile -PathType Leaf)) {
     if ($NoConfirm -and -not $optionsFileExplicit) {
         Write-Host "Options file not found: $OptionsFile (continuing without it)"
     }
@@ -173,6 +184,8 @@ if (-not (Test-Path -LiteralPath $OptionsFile -PathType Leaf)) {
                     CsvOutputPath = $defaults.CsvOutputPath
                     SourceExtensions = $defaults.SourceExtensions
                     TargetExtensions = $defaults.TargetExtensions
+                    VerboseMatches = $defaults.VerboseMatches
+                    DeleteMatches = $defaults.DeleteMatches
                 }
 
                 $defaultOptions | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $OptionsFile -Encoding UTF8
@@ -186,15 +199,17 @@ if (-not (Test-Path -LiteralPath $OptionsFile -PathType Leaf)) {
 }
 
 $fileOptions = $null
-if (Test-Path -LiteralPath $OptionsFile -PathType Leaf) {
-    try {
-        $rawOptions = Get-Content -LiteralPath $OptionsFile -Raw
-        if (-not [string]::IsNullOrWhiteSpace($rawOptions)) {
-            $fileOptions = $rawOptions | ConvertFrom-Json
+if (-not $UseCliOnly) {
+    if (Test-Path -LiteralPath $OptionsFile -PathType Leaf) {
+        try {
+            $rawOptions = Get-Content -LiteralPath $OptionsFile -Raw
+            if (-not [string]::IsNullOrWhiteSpace($rawOptions)) {
+                $fileOptions = $rawOptions | ConvertFrom-Json
+            }
         }
-    }
-    catch {
-        throw "Failed to read options file '$OptionsFile': $($_.Exception.Message)"
+        catch {
+            throw "Failed to read options file '$OptionsFile': $($_.Exception.Message)"
+        }
     }
 }
 
@@ -254,6 +269,22 @@ else {
     if ($null -ne $optionTargetExtensions) { $optionTargetExtensions } else { $defaults.TargetExtensions }
 }
 
+$resolvedVerboseMatches = if ($PSBoundParameters.ContainsKey("VerboseMatches")) {
+    $VerboseMatches.IsPresent
+}
+else {
+    $optionVerboseMatches = Get-OptionValue -Options $fileOptions -Name "VerboseMatches"
+    if ($null -ne $optionVerboseMatches) { [bool]$optionVerboseMatches } else { $defaults.VerboseMatches }
+}
+
+$resolvedDeleteMatches = if ($PSBoundParameters.ContainsKey("DeleteMatches")) {
+    $DeleteMatches.IsPresent
+}
+else {
+    $optionDeleteMatches = Get-OptionValue -Options $fileOptions -Name "DeleteMatches"
+    if ($null -ne $optionDeleteMatches) { [bool]$optionDeleteMatches } else { $defaults.DeleteMatches }
+}
+
 if ([string]::IsNullOrWhiteSpace($resolvedSourceDir)) {
     throw "SourceDir is required. Provide -SourceDir or set SourceDir in options.json."
 }
@@ -295,25 +326,25 @@ $sourceFiles = Get-ChildItem -LiteralPath $sourceRoot -File -Recurse:$recurse |
 $targetCount = ($targetFiles | Measure-Object).Count
 $sourceCount = ($sourceFiles | Measure-Object).Count
 
-$unmatched = foreach ($file in $sourceFiles) {
+$sourceMatchReport = foreach ($file in $sourceFiles) {
     $baseName = Get-NormalizedBaseName -Name $file.BaseName
-    if (-not $targetBaseNames.Contains($baseName)) {
-        if ($resolvedShowRelativePaths) {
-            [PSCustomObject]@{
-                BaseName = $file.BaseName
-                FilePath = [System.IO.Path]::GetRelativePath($sourceRoot, $file.FullName)
-            }
-        }
-        else {
-            [PSCustomObject]@{
-                BaseName = $file.BaseName
-                FilePath = $file.FullName
-            }
-        }
+    $presentInTarget = $targetBaseNames.Contains($baseName)
+    $filePath = if ($resolvedShowRelativePaths) {
+        [System.IO.Path]::GetRelativePath($sourceRoot, $file.FullName)
+    }
+    else {
+        $file.FullName
+    }
+
+    [PSCustomObject]@{
+        BaseName = $file.BaseName
+        FilePath = $filePath
+        PresentInTarget = if ($presentInTarget) { "Yes" } else { "No" }
     }
 }
 
-$sortedUnmatched = $unmatched | Sort-Object BaseName, FilePath
+$sortedSourceReport = $sourceMatchReport | Sort-Object @{ Expression = { if ($_.PresentInTarget -eq "Yes") { 0 } else { 1 } } }, BaseName, FilePath
+$sortedUnmatched = $sortedSourceReport | Where-Object { $_.PresentInTarget -eq "No" }
 $unmatchedCount = ($sortedUnmatched | Measure-Object).Count
 
 if ($null -ne $resolvedCsvOutputPath) {
@@ -324,6 +355,84 @@ if ($null -ne $resolvedCsvOutputPath) {
 
     $sortedUnmatched | Export-Csv -LiteralPath $resolvedCsvOutputPath -NoTypeInformation -Encoding UTF8
     Write-Host "CSV written to: $resolvedCsvOutputPath"
+}
+
+if ($resolvedVerboseMatches) {
+    Write-Host ""
+    Write-Host "Source file match report:"
+    $sortedSourceReport |
+        Select-Object @{ Name = "Match"; Expression = { $_.PresentInTarget } }, @{ Name = "BaseName"; Expression = { $_.BaseName } } |
+        Format-Table -AutoSize
+
+    Write-Host ""
+    Write-Host ("Total source files: {0}" -f $sourceCount)
+    Write-Host ("Matched: {0}" -f (($sortedSourceReport | Where-Object { $_.PresentInTarget -eq "Yes" } | Measure-Object).Count))
+    Write-Host ("Unmatched: {0}" -f $unmatchedCount)
+
+    $csvWritten = if ($null -ne $resolvedCsvOutputPath) { "true" } else { "false" }
+    Write-Host ("SUMMARY|tool=vidmatch|status=ok|source_files={0}|target_files={1}|matched={2}|unmatched={3}|csv_written={4}|verbose_matches=true" -f $sourceCount, $targetCount, (($sortedSourceReport | Where-Object { $_.PresentInTarget -eq "Yes" } | Measure-Object).Count), $unmatchedCount, $csvWritten)
+    exit 0
+}
+
+if ($resolvedDeleteMatches) {
+    $matchedFiles = $sortedSourceReport | Where-Object { $_.PresentInTarget -eq "Yes" }
+    $matchedCount = ($matchedFiles | Measure-Object).Count
+
+    if ($matchedCount -eq 0) {
+        Write-Host "No matched files found. Nothing to delete."
+        Write-Host ("SUMMARY|tool=vidmatch|status=noop|source_files={0}|target_files={1}|matched=0|deleted_source=0|deleted_target=0|unmatched={2}" -f $sourceCount, $targetCount, $unmatchedCount)
+        exit 0
+    }
+
+    Write-Host ""
+    Write-Host "Matched files:"
+    $matchedFiles |
+        Select-Object @{ Name = "Match"; Expression = { $_.PresentInTarget } }, @{ Name = "BaseName"; Expression = { $_.BaseName } } |
+        Format-Table -AutoSize
+
+    Write-Host ""
+    Write-Host "Delete matched files from:"
+    Write-Host "  1. Source folder"
+    Write-Host "  2. Target folder"
+    Write-Host "  3. Exit without deleting"
+    $choice = Read-Host "Enter 1, 2, or 3"
+
+    if ($choice -eq "3") {
+        Write-Host "No deletions performed."
+        Write-Host ("SUMMARY|tool=vidmatch|status=aborted|source_files={0}|target_files={1}|matched={2}|deleted_source=0|deleted_target=0|unmatched={3}" -f $sourceCount, $targetCount, $matchedCount, $unmatchedCount)
+        exit 0
+    }
+
+    if (($choice -ne "1") -and ($choice -ne "2")) {
+        throw "Invalid choice. No deletions performed."
+    }
+
+    $deleteSource = $choice -eq "1"
+    $deletedCount = 0
+
+    foreach ($item in $matchedFiles) {
+        if ($deleteSource) {
+            $pathToDelete = $item.FilePath
+        }
+        else {
+            $pathToDelete = $null
+            $targetCandidate = Join-Path $targetRoot ($item.BaseName + ".mp4")
+            if (Test-Path -LiteralPath $targetCandidate -PathType Leaf) {
+                $pathToDelete = $targetCandidate
+            }
+        }
+
+        if ($null -ne $pathToDelete -and (Test-Path -LiteralPath $pathToDelete -PathType Leaf)) {
+            Remove-Item -LiteralPath $pathToDelete -Force
+            $deletedCount++
+            Write-Host ("Deleted: {0}" -f $pathToDelete)
+        }
+    }
+
+    $deletedSource = if ($deleteSource) { $deletedCount } else { 0 }
+    $deletedTarget = if ($deleteSource) { 0 } else { $deletedCount }
+    Write-Host ("SUMMARY|tool=vidmatch|status=ok|source_files={0}|target_files={1}|matched={2}|deleted_source={3}|deleted_target={4}|unmatched={5}" -f $sourceCount, $targetCount, $matchedCount, $deletedSource, $deletedTarget, $unmatchedCount)
+    exit 0
 }
 
 if (-not $sortedUnmatched) {

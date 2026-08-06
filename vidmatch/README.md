@@ -38,6 +38,7 @@ When available, it copies from `options.json.example`.
 - CsvOutputPath: `null` (no CSV output)
 - SourceExtensions: `[".avi", ".mp4"]`
 - TargetExtensions: `[".avi", ".mp4"]`
+- VerboseMatches: `false`
 
 Required:
 
@@ -100,6 +101,26 @@ Required:
   -TargetExtensions .avi,.mp4
 ```
 
+### 9) Verbose match report for every source file
+
+```powershell
+.\vidmatch.ps7.ps1 -SourceDir "M:/p/handbrake" -TargetDir "Z:/" -VerboseMatches
+```
+
+### 10) Review matches and choose a deletion target
+
+```powershell
+.\vidmatch.ps7.ps1 -SourceDir "M:/p/handbrake" -TargetDir "Z:/" -DeleteMatches
+```
+
+### 11) Delete matches from the source folder
+
+Choose deletion target `1` when prompted to remove matched files from the source folder only.
+
+### 12) Delete matches from the target folder
+
+Choose deletion target `2` when prompted to remove matched files from the target folder only.
+
 ## Optional UI
 
 This project includes a small Windows UI script with:
@@ -161,3 +182,7 @@ Notes:
 - Extension checks are case-insensitive.
 - Basename matching is case-insensitive.
 - CSV is only written when `CsvOutputPath` is provided by argument or options file.
+- `-VerboseMatches` prints every source file with `PresentInTarget` set to `Yes` or `No`.
+- Verbose mode lists matched files first, then unmatched files.
+- `-DeleteMatches` only offers deletion for matched files, never unmatched files.
+- In delete mode, choose `1` for source deletions, `2` for target deletions, or `3` to exit without deleting.

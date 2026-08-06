@@ -15,7 +15,10 @@ param(
     [switch]$DryRun,
 
     [Parameter(Mandatory = $false)]
-    [switch]$NoConfirm
+    [switch]$NoConfirm,
+
+    [Parameter(Mandatory = $false)]
+    [switch]$UseCliOnly
 )
 
 $ErrorActionPreference = "Stop"
@@ -42,7 +45,7 @@ $exampleOptionsFile = Join-Path $scriptRoot $exampleOptionsFileName
 
 function Get-OptionValue {
     param(
-        [Parameter(Mandatory = $true)][object]$Options,
+        [Parameter(Mandatory = $false)][AllowNull()][object]$Options,
         [Parameter(Mandatory = $true)][string]$Name
     )
 
@@ -89,14 +92,14 @@ function ConvertTo-NormalizedExtensionArray {
 # ---------------------------------------------------------------------------
 
 $defaults = [PSCustomObject]@{
-    Extensions = @(".avi", ".mp4")
+    Extensions = @(".avi", ".mp4", ".mkv")
 }
 
 # ---------------------------------------------------------------------------
 # Options file: prompt to create if missing
 # ---------------------------------------------------------------------------
 
-if (-not (Test-Path -LiteralPath $OptionsFile -PathType Leaf)) {
+if (-not $UseCliOnly -and -not (Test-Path -LiteralPath $OptionsFile -PathType Leaf)) {
     if ($NoConfirm -and -not $optionsFileExplicit) {
         Write-Host "Options file not found: $OptionsFile (continuing without it)"
     }
@@ -133,7 +136,7 @@ if (-not (Test-Path -LiteralPath $OptionsFile -PathType Leaf)) {
 # ---------------------------------------------------------------------------
 
 $fileOptions = $null
-if (Test-Path -LiteralPath $OptionsFile -PathType Leaf) {
+if (-not $UseCliOnly -and (Test-Path -LiteralPath $OptionsFile -PathType Leaf)) {
     try {
         $rawOptions = Get-Content -LiteralPath $OptionsFile -Raw
         if (-not [string]::IsNullOrWhiteSpace($rawOptions)) {
@@ -150,7 +153,10 @@ if (Test-Path -LiteralPath $OptionsFile -PathType Leaf) {
 # ---------------------------------------------------------------------------
 
 $resolvedSourceDir = if ($PSBoundParameters.ContainsKey("SourceDir")) {
-    $SourceDir
+    Normalize-OptionalString $SourceDir
+}
+elseif ($UseCliOnly) {
+    $null
 }
 else {
     $v = Normalize-OptionalString (Get-OptionValue -Options $fileOptions -Name "SourceDir")
@@ -158,7 +164,10 @@ else {
 }
 
 $resolvedDestDir = if ($PSBoundParameters.ContainsKey("DestDir")) {
-    $DestDir
+    Normalize-OptionalString $DestDir
+}
+elseif ($UseCliOnly) {
+    $null
 }
 else {
     $v = Normalize-OptionalString (Get-OptionValue -Options $fileOptions -Name "DestDir")
@@ -167,6 +176,9 @@ else {
 
 $resolvedExtensions = if ($PSBoundParameters.ContainsKey("Extensions")) {
     ConvertTo-NormalizedExtensionArray $Extensions
+}
+elseif ($UseCliOnly) {
+    $defaults.Extensions
 }
 else {
     $v = ConvertTo-NormalizedExtensionArray (Get-OptionValue -Options $fileOptions -Name "Extensions")
@@ -208,6 +220,9 @@ if ([string]::IsNullOrWhiteSpace($destRoot)) {
 $extensionSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
 foreach ($ext in $resolvedExtensions) { [void]$extensionSet.Add($ext) }
 
+$blockedExtensions = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+foreach ($bext in @(".nfo", ".jpg", ".jpeg", ".png", ".webp", ".!qb")) { [void]$blockedExtensions.Add($bext) }
+
 # ---------------------------------------------------------------------------
 # Scan for matching files
 # ---------------------------------------------------------------------------
@@ -215,7 +230,7 @@ foreach ($ext in $resolvedExtensions) { [void]$extensionSet.Add($ext) }
 Write-Host "Scanning: $sourceRoot"
 
 $matchedFiles = Get-ChildItem -LiteralPath $sourceRoot -File -Recurse |
-    Where-Object { $extensionSet.Contains(($_.Extension).ToLowerInvariant()) }
+    Where-Object { $extensionSet.Contains(($_.Extension).ToLowerInvariant()) -and -not $blockedExtensions.Contains(($_.Extension).ToLowerInvariant()) }
 $matchedCount = ($matchedFiles | Measure-Object).Count
 
 if ($matchedFiles.Count -eq 0) {

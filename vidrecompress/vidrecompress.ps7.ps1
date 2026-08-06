@@ -60,7 +60,7 @@ $exampleOptionsFile = Join-Path $scriptRoot $exampleOptionsFileName
 
 function Get-OptionValue {
     param(
-        [Parameter(Mandatory = $true)][object]$Options,
+        [Parameter(Mandatory = $false)][AllowNull()][object]$Options,
         [Parameter(Mandatory = $true)][string]$Name
     )
     if ($null -eq $Options) { return $null }

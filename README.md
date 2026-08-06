@@ -84,6 +84,18 @@ Firefox WebExtension + Windows native helper that annotates `.avi` filenames on 
 
 ---
 
+### [webui](webui/)
+
+Dockerized browser UI MVP for queuing and monitoring `viddispatch` runs on a single host.
+
+- FastAPI web app + Redis queue + RQ worker
+- Dry-run-first control for safe initial browser validation
+- Shows run output and final `SUMMARY|...` line
+
+→ See [webui/README.md](webui/README.md)
+
+---
+
 ## Workflow
 
 ```text

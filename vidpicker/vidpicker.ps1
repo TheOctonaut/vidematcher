@@ -117,7 +117,7 @@ function Get-RelativePath {
 # ---------------------------------------------------------------------------
 
 $defaults = [PSCustomObject]@{
-    Extensions = @(".avi", ".mp4")
+    Extensions = @(".avi", ".mp4", ".mkv")
 }
 
 # ---------------------------------------------------------------------------
@@ -236,6 +236,9 @@ if ([string]::IsNullOrWhiteSpace($destRoot)) {
 $extensionSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
 foreach ($ext in $resolvedExtensions) { [void]$extensionSet.Add($ext) }
 
+$blockedExtensions = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+foreach ($bext in @(".nfo", ".jpg", ".jpeg", ".png", ".webp", ".!qb")) { [void]$blockedExtensions.Add($bext) }
+
 # ---------------------------------------------------------------------------
 # Scan for matching files
 # ---------------------------------------------------------------------------
@@ -243,7 +246,7 @@ foreach ($ext in $resolvedExtensions) { [void]$extensionSet.Add($ext) }
 Write-Host "Scanning: $sourceRoot"
 
 $matchedFiles = Get-ChildItem -LiteralPath $sourceRoot -File -Recurse |
-    Where-Object { $extensionSet.Contains(($_.Extension).ToLowerInvariant()) }
+    Where-Object { $extensionSet.Contains(($_.Extension).ToLowerInvariant()) -and -not $blockedExtensions.Contains(($_.Extension).ToLowerInvariant()) }
 $matchedCount = ($matchedFiles | Measure-Object).Count
 
 if ($matchedFiles.Count -eq 0) {

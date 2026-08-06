@@ -1,0 +1,416 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>vidematcher webui</title>
+    <style>
+      *, *::before, *::after { box-sizing: border-box; }
+      body { font-family: Arial, sans-serif; margin: 0; padding: 1.5rem 2rem; max-width: 1100px; background: #f8f8f8; }
+
+      /* header */
+      .header { display: flex; align-items: baseline; gap: 1.5rem; margin-bottom: 1.2rem; }
+      .header h1 { margin: 0; font-size: 1.4rem; }
+      .badge { font-size: 0.8rem; padding: 0.2rem 0.55rem; border-radius: 4px; font-weight: 600; }
+      .badge-ok  { background: #d4f0de; color: #0a6b2d; }
+      .badge-warn{ background: #fef3cd; color: #8a4b00; }
+      .badge-err { background: #fde2e5; color: #9a0015; }
+      .status-panel { display: flex; gap: 0.6rem; align-items: center; flex-wrap: wrap; margin: 0.8rem 0 1rem; }
+      .status-row { display: flex; gap: 0.5rem; flex-wrap: wrap; margin-top: 0.5rem; }
+      .status-pill { padding: 0.2rem 0.55rem; border-radius: 999px; font-size: 0.78rem; font-weight: 700; }
+      .status-ready { background: #d4f0de; color: #0a6b2d; }
+      .status-warning { background: #fef3cd; color: #8a4b00; }
+      .status-blocked { background: #fde2e5; color: #9a0015; }
+
+      /* tabs */
+      .tabs { display: flex; gap: 0; border-bottom: 2px solid #ccc; margin-bottom: 0; }
+      .tab-link {
+        display: inline-block; padding: 0.55rem 1.2rem; text-decoration: none;
+        color: #444; border: 1px solid transparent; border-bottom: none;
+        border-radius: 6px 6px 0 0; font-weight: 600; font-size: 0.92rem;
+        background: #ececec; margin-right: 3px;
+        position: relative; bottom: -2px;
+      }
+      .tab-link:hover { background: #e0e0e0; color: #000; }
+      .tab-link.active {
+        background: #fff; border-color: #ccc; color: #000;
+        border-bottom-color: #fff;
+      }
+      .tab-link .destructive-dot {
+        display: inline-block; width: 7px; height: 7px;
+        background: #e05c00; border-radius: 50%; margin-left: 5px;
+        vertical-align: middle;
+      }
+
+      /* tab panel */
+      .tab-panel {
+        background: #fff; border: 1px solid #ccc; border-top: none;
+        border-radius: 0 0 8px 8px; padding: 1.4rem;
+      }
+      .tab-panel-header {
+        display: flex; align-items: center; gap: 0.8rem; margin-bottom: 0.3rem;
+      }
+      .tab-panel-header h2 { margin: 0; font-size: 1.1rem; }
+
+      /* two-column layout inside tab */
+      .tab-body { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; margin-top: 1.2rem; }
+      @media (max-width: 750px) { .tab-body { grid-template-columns: 1fr; } }
+      .col-section h3 { margin: 0 0 0.7rem; font-size: 0.95rem; color: #333; border-bottom: 1px solid #eee; padding-bottom: 0.3rem; }
+
+      /* fields */
+      .field { margin-bottom: 0.9rem; }
+      .field label { display: block; font-weight: 600; font-size: 0.85rem; margin-bottom: 0.25rem; color: #222; }
+      .field .hint { font-size: 0.78rem; color: #666; font-weight: 400; margin-left: 0.3rem; }
+      .field input[type="text"], .field textarea {
+        width: 100%; padding: 0.4rem 0.5rem; border: 1px solid #bbb;
+        border-radius: 4px; font-size: 0.9rem; background: #fdfdfd;
+      }
+      .field input[type="text"]:focus, .field textarea:focus {
+        outline: none; border-color: #5591d8; box-shadow: 0 0 0 2px rgba(85,145,216,0.2);
+      }
+      .field textarea { font-family: Consolas, monospace; min-height: 80px; resize: vertical; }
+
+      /* switches */
+      .switches { display: flex; gap: 1rem; flex-wrap: wrap; margin-bottom: 0.8rem; }
+      .switch-label { display: flex; align-items: center; gap: 0.4rem; font-size: 0.9rem; cursor: pointer; }
+      .switch-label input[type="checkbox"] { width: 1rem; height: 1rem; accent-color: #5591d8; }
+
+      /* buttons */
+      .actions { display: flex; gap: 0.6rem; flex-wrap: wrap; align-items: center; margin-top: 0.8rem; }
+      .btn { padding: 0.5rem 1rem; border-radius: 4px; border: 1px solid #bbb; cursor: pointer; font-size: 0.88rem; font-weight: 600; }
+      .btn-primary { background: #2b6cb0; color: #fff; border-color: #2b6cb0; }
+      .btn-primary:hover { background: #215798; }
+      .btn-primary:disabled { background: #9ab; border-color: #9ab; cursor: not-allowed; }
+      .btn-secondary { background: #fff; color: #333; }
+      .btn-secondary:hover { background: #f0f0f0; }
+      .btn-run { background: #276749; color: #fff; border-color: #276749; }
+      .btn-run:hover { background: #1f5238; }
+      .btn-run:disabled { background: #7aab90; border-color: #7aab90; cursor: not-allowed; }
+      .btn-danger { background: #9a0015; color: #fff; border-color: #9a0015; }
+      .btn-danger:hover { background: #7a0010; }
+
+      /* notices */
+      .notice { padding: 0.5rem 0.8rem; border-radius: 4px; font-size: 0.87rem; margin-bottom: 0.7rem; }
+      .notice-ok  { background: #d4f0de; color: #0a6b2d; }
+      .notice-err { background: #fde2e5; color: #9a0015; }
+
+      /* job result */
+      .result-panel { background: #fff; border: 1px solid #ccc; border-radius: 8px; padding: 1.2rem; margin-top: 1.5rem; }
+      .result-panel h2 { margin: 0 0 0.7rem; font-size: 1rem; }
+      .result-meta { display: flex; gap: 1.5rem; flex-wrap: wrap; margin-bottom: 0.8rem; font-size: 0.88rem; }
+      .result-meta strong { margin-right: 0.3rem; }
+      pre { background: #111; color: #ddd; padding: 0.9rem; overflow: auto; border-radius: 6px; font-size: 0.82rem; max-height: 400px; }
+      .muted { color: #666; }
+      hr { border: none; border-top: 1px solid #e0e0e0; margin: 1rem 0; }
+      .live-indicator { display: inline-flex; align-items: center; gap: 0.35rem; font-size: 0.8rem; color: #666; }
+      .live-dot { width: 0.5rem; height: 0.5rem; border-radius: 999px; background: #7aab90; animation: pulse 1.5s infinite; }
+      @keyframes pulse { 0%, 100% { opacity: 0.35; } 50% { opacity: 1; } }
+    </style>
+  </head>
+  <body>
+
+    <div class="header">
+      <h1>vidematcher webui</h1>
+      {% if allow_destructive %}
+        <span class="badge badge-warn">destructive runs enabled</span>
+      {% else %}
+        <span class="badge badge-ok">dry-run only</span>
+      {% endif %}
+    </div>
+
+    <div class="result-panel" style="margin-top:0">
+      <h2>Path strategy</h2>
+      <p class="muted">Canonical config values stay on the host. Docker uses the mounted alias for execution.</p>
+      <table>
+        <thead>
+          <tr>
+            <th>Host path</th>
+            <th>Container path</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>{{ host_scripts_root }}</code></td>
+            <td><code>{{ container_scripts_root }}</code></td>
+          </tr>
+          {% for mapping in path_mount_map %}
+          <tr>
+            <td><code>{{ mapping.host }}</code></td>
+            <td><code>{{ mapping.container }}</code></td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    <!-- Tabs -->
+    <div class="tabs">
+      {% for tool in tools %}
+        <a href="/?tool_key={{ tool.key }}{% if job_id %}&job_id={{ job_id }}{% endif %}"
+           class="tab-link {% if selected_tool and selected_tool.key == tool.key %}active{% endif %}">
+          {{ tool.name }}
+          {% if tool.destructive %}<span class="destructive-dot" title="destructive"></span>{% endif %}
+        </a>
+      {% endfor %}
+    </div>
+
+    {% if selected_tool %}
+    <div class="tab-panel">
+
+      <div class="tab-panel-header">
+        <h2>{{ selected_tool.name }}</h2>
+        {% if selected_tool.destructive %}
+          <span class="badge badge-warn">destructive</span>
+        {% else %}
+          <span class="badge badge-ok">read-only</span>
+        {% endif %}
+        <span class="muted" style="font-size:0.85rem">{{ selected_tool.summary }}</span>
+      </div>
+
+      {% if config_saved %}<div class="notice notice-ok">Config saved.</div>{% endif %}
+      {% if config_imported %}<div class="notice notice-ok">Imported from script options.json.</div>{% endif %}
+      {% if config_error %}<div class="notice notice-err">{{ config_error }}</div>{% endif %}
+
+      {% if selected_validation %}
+      <div class="status-panel">
+        <span class="status-pill status-{{ selected_validation.state }}">{{ selected_validation.state }}</span>
+        <span class="muted">Readiness checks for this tool</span>
+      </div>
+      <div class="status-row">
+        {% for check in selected_validation.checks %}
+          <span class="status-pill status-{{ check.state }}">{{ check.name }}: {{ check.reason }}</span>
+        {% endfor %}
+      </div>
+      {% endif %}
+
+      <form method="post" action="/config/save">
+        <input type="hidden" name="tool_key" value="{{ selected_tool.key }}">
+
+        <div class="tab-body">
+
+          <!-- LEFT: config fields -->
+          <div class="col-section">
+            <h3>Configuration</h3>
+
+            {% for param in selected_tool.string_params %}
+            <div class="field">
+              <label>{{ param.config_key }}</label>
+              <input type="text"
+                     name="cfg_{{ param.config_key }}"
+                     value="{{ selected_config.get(param.config_key, '') }}"
+                     placeholder="not set">
+            </div>
+            {% endfor %}
+
+            {% for param in selected_tool.array_params %}
+            <div class="field">
+              <label>{{ param.config_key }} <span class="hint">(one per line)</span></label>
+              <textarea name="cfg_{{ param.config_key }}"
+                        placeholder="not set">{{ (selected_config.get(param.config_key) or []) | join('\n') }}</textarea>
+            </div>
+            {% endfor %}
+
+            <div class="actions">
+              <button type="submit" class="btn btn-primary">Save config</button>
+              <button type="button" class="btn btn-secondary"
+                      onclick="document.getElementById('import-form-{{ selected_tool.key }}').submit()">
+                Re-import from options.json
+              </button>
+            </div>
+          </div>
+
+          <!-- RIGHT: run controls -->
+          <div class="col-section">
+            <h3>Run</h3>
+            <p class="muted" style="font-size:0.85rem; margin-top:0">
+              Runs pass saved config values as explicit parameters.<br>
+              Script: <code>{{ selected_tool.script_path }}</code>
+            </p>
+
+            <div class="switches">
+              {% set sws = selected_tool.switches %}
+              {% if "-DryRun" in sws %}
+              <label class="switch-label">
+                <input type="checkbox" form="run-form-{{ selected_tool.key }}" name="dry_run" value="true" checked>
+                Dry run
+              </label>
+              {% endif %}
+              {% if "-NoConfirm" in sws %}
+              <label class="switch-label">
+                <input type="checkbox" form="run-form-{{ selected_tool.key }}" name="no_confirm" value="true" checked>
+                No confirm
+              </label>
+              {% endif %}
+              {% if "-SkipPick" in sws %}
+              <label class="switch-label">
+                <input type="checkbox" form="run-form-{{ selected_tool.key }}" name="skip_pick" value="true">
+                Skip pick
+              </label>
+              {% endif %}
+              {% if "-NoRecurse" in sws %}
+              <label class="switch-label">
+                <input type="checkbox" form="run-form-{{ selected_tool.key }}" name="no_recurse" value="true">
+                No recurse
+              </label>
+              {% endif %}
+              {% if "-Recurse" in sws %}
+              <label class="switch-label">
+                <input type="checkbox" form="run-form-{{ selected_tool.key }}" name="recurse" value="true">
+                Recurse
+              </label>
+              {% endif %}
+              {% if "-VerboseConsole" in sws %}
+              <label class="switch-label">
+                <input type="checkbox" form="run-form-{{ selected_tool.key }}" name="verbose_console" value="true">
+                Verbose
+              </label>
+              {% endif %}
+            </div>
+
+            <div class="actions">
+              {% if selected_validation and selected_validation.state == "blocked" %}
+                <button class="btn btn-run" disabled title="Fix blocked checks first">Queue run (blocked)</button>
+                <span class="muted" style="font-size:0.82rem">Blocked by readiness checks</span>
+              {% else %}
+                <button form="run-form-{{ selected_tool.key }}" type="submit" class="btn btn-run">Queue run</button>
+              {% endif %}
+            </div>
+
+            {% if selected_tool.destructive %}
+            <div class="field" style="margin-top:1rem">
+              <label for="destructive_ack">Type I understand to confirm destructive run</label>
+              <input type="text" form="run-form-{{ selected_tool.key }}" id="destructive_ack" name="destructive_ack" placeholder="I understand">
+            </div>
+            {% endif %}
+          </div>
+
+        </div><!-- tab-body -->
+      </form>
+
+      <!-- Separate hidden forms to avoid nesting -->
+      <form id="run-form-{{ selected_tool.key }}" method="post" action="/runs" style="display:none">
+        <input type="hidden" name="tool_key" value="{{ selected_tool.key }}">
+      </form>
+      <form id="import-form-{{ selected_tool.key }}" method="post" action="/config/import" style="display:none">
+        <input type="hidden" name="tool_key" value="{{ selected_tool.key }}">
+      </form>
+
+    </div><!-- tab-panel -->
+    {% endif %}
+
+    <!-- Job result -->
+    {% if job_id %}
+    <div class="result-panel" id="job-result-panel">
+      <h2>Last run result</h2>
+      {% if job_id and not job_data %}
+      <span class="live-indicator"><span class="live-dot"></span>live updates</span>
+      {% endif %}
+      <div class="result-meta">
+        <span><strong>Job:</strong> <code>{{ job_id }}</code></span>
+        <span><strong>Status:</strong> <span id="job-status">{{ job_status }}</span></span>
+        {% if job_data %}
+          <span><strong>Tool:</strong> {{ job_data.tool_key }}</span>
+          <span><strong>Return code:</strong> {{ job_data.return_code }}</span>
+        {% endif %}
+      </div>
+
+      {% if error %}
+        <div class="notice notice-err">{{ error }}</div>
+      {% endif %}
+
+      {% if job_data %}
+        {% if job_data.summary_line %}
+          <div class="notice notice-ok" style="font-family: Consolas, monospace; font-size: 0.82rem">{{ job_data.summary_line }}</div>
+        {% endif %}
+        <details open>
+          <summary style="cursor:pointer; font-weight:600; font-size:0.9rem">stdout</summary>
+          <pre>{{ job_data.stdout or "(empty)" }}</pre>
+        </details>
+        {% if job_data.stderr %}
+        <details>
+          <summary style="cursor:pointer; font-weight:600; font-size:0.9rem; margin-top:0.5rem">stderr</summary>
+          <pre>{{ job_data.stderr }}</pre>
+        </details>
+        {% endif %}
+        <p class="muted" style="font-size:0.8rem; margin-top:0.5rem">
+          Command: <code>{{ " ".join(job_data.command) }}</code>
+        </p>
+      {% else %}
+        <p class="muted" id="job-live-message">Job is queued or running — updating live.</p>
+      {% endif %}
+    </div>
+    {% endif %}
+
+    <div class="result-panel">
+      <h2>Recent runs</h2>
+      {% if recent_runs %}
+        <table>
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>Tool</th>
+              <th>Status</th>
+              <th>Started</th>
+              <th>Summary</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for run in recent_runs %}
+            <tr>
+              <td><a href="/runs/{{ run.id }}">{{ run.id }}</a></td>
+              <td>{{ run.tool_key }}</td>
+              <td>{{ run.status }}</td>
+              <td>{{ run.started_at }}</td>
+              <td>{{ run.summary_line or "" }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      {% else %}
+        <p class="muted">No runs recorded yet.</p>
+      {% endif %}
+    </div>
+
+  </body>
+  <script>
+    (function () {
+      const jobId = {{ job_id|tojson }};
+      const runId = {{ job_data.id if job_data else None|tojson }};
+      if (!jobId && !runId) return;
+      
+      const poll = async () => {
+        try {
+          const statusEl = document.getElementById('job-status');
+          const res = await fetch(window.location.href, { cache: 'no-store' });
+          if (!res.ok) return;
+          const html = await res.text();
+          const parser = new DOMParser();
+          const doc = parser.parseFromString(html, 'text/html');
+          const newStatusEl = doc.getElementById('job-status');
+          if (statusEl && newStatusEl) statusEl.textContent = newStatusEl.textContent;
+          const newPanel = doc.getElementById('job-result-panel');
+          if (newPanel) {
+            const currentPanel = document.getElementById('job-result-panel');
+            if (currentPanel) currentPanel.replaceWith(newPanel);
+          }
+          const statusText = newStatusEl ? newStatusEl.textContent.trim() : '';
+          
+          // If job finished and we have run_id, switch to run_id polling
+          if ((statusText === 'finished' || statusText === 'failed') && runId && jobId && !window.location.search.includes('run_id')) {
+            const newUrl = window.location.search.replace(/job_id=[^&]*/, `run_id=${runId}`);
+            window.history.replaceState({}, '', window.location.pathname + newUrl);
+          }
+          
+          if (statusText === 'queued' || statusText === 'started' || statusText === 'running') {
+            setTimeout(poll, 2500);
+            return;
+          }
+          setTimeout(poll, 2500);
+        } catch (_) {
+          setTimeout(poll, 4000);
+        }
+      };
+      setTimeout(poll, 1500);
+    })();
+  </script>
+</html>
