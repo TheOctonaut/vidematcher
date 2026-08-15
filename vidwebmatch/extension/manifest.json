@@ -36,7 +36,12 @@
   ],
   "browser_specific_settings": {
     "gecko": {
-      "id": "vidwebmatch@theoctonaut.local",
+      "id": "vidwebmatch@theoctonaut.dev",
+      "data_collection_permissions": {
+        "required": [
+          "none"
+        ]
+      },
       "strict_min_version": "109.0"
     }
   }
