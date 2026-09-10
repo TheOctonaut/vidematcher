@@ -71,6 +71,20 @@ Runs the full pipeline in one command: picks files from staging, checks which on
 
 ---
 
+### [vidtranscribe](vidtranscribe/)
+
+Transcribes video files to subtitles locally using WhisperX (faster-whisper + word-level alignment) in a GPU-accelerated Docker container. Auto-detects spoken language, skips files that already have subtitles.
+
+Use this to generate Jellyfin-compatible subtitles for a video library, plus a richer JSON sidecar (word-level timestamps) for future tagging/metadata use.
+
+- Standalone tool; not yet part of the `viddispatch` pipeline
+- Dry run mode; skips files with existing subtitles
+- Outputs `Movie.<lang>.srt` (Jellyfin external subtitle) and `Movie.vidtranscribe.json` (rich metadata) next to the source file
+
+→ See [vidtranscribe/README.md](vidtranscribe/README.md)
+
+---
+
 ### [vidwebmatch](vidwebmatch/)
 
 Firefox WebExtension + Windows native helper that annotates `.avi` filenames on matching pages by checking a configured local video library root using basename matching (extension ignored).

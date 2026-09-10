@@ -1,0 +1,9 @@
+{
+  "ModelsPath": "C:/server/vidtranscribe/models",
+  "DockerImage": "vidtranscribe:latest",
+  "Model": "turbo",
+  "ComputeType": "float16",
+  "Device": "cuda",
+  "MaxFiles": 0,
+  "AutoTranslate": true
+}
