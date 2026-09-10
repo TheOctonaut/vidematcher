@@ -15,7 +15,10 @@ param(
     [switch]$DryRun,
 
     [Parameter(Mandatory = $false)]
-    [switch]$NoConfirm
+    [switch]$NoConfirm,
+
+    [Parameter(Mandatory = $false)]
+    [switch]$UseCliOnly
 )
 
 $ErrorActionPreference = "Stop"
@@ -124,7 +127,7 @@ $defaults = [PSCustomObject]@{
 # Options file: prompt to create if missing
 # ---------------------------------------------------------------------------
 
-if (-not (Test-Path -LiteralPath $OptionsFile -PathType Leaf)) {
+if (-not $UseCliOnly -and -not (Test-Path -LiteralPath $OptionsFile -PathType Leaf)) {
     if ($NoConfirm -and -not $optionsFileExplicit) {
         Write-Host "Options file not found: $OptionsFile (continuing without it)"
     }
@@ -161,7 +164,7 @@ if (-not (Test-Path -LiteralPath $OptionsFile -PathType Leaf)) {
 # ---------------------------------------------------------------------------
 
 $fileOptions = $null
-if (Test-Path -LiteralPath $OptionsFile -PathType Leaf) {
+if (-not $UseCliOnly -and (Test-Path -LiteralPath $OptionsFile -PathType Leaf)) {
     try {
         $rawOptions = Get-Content -LiteralPath $OptionsFile -Raw
         if (-not [string]::IsNullOrWhiteSpace($rawOptions)) {
@@ -180,6 +183,9 @@ if (Test-Path -LiteralPath $OptionsFile -PathType Leaf) {
 $resolvedSourceDir = if ($PSBoundParameters.ContainsKey("SourceDir")) {
     $SourceDir
 }
+elseif ($UseCliOnly) {
+    $null
+}
 else {
     $v = Normalize-OptionalString (Get-OptionValue -Options $fileOptions -Name "SourceDir")
     if ($null -ne $v) { $v } else { $null }
@@ -188,6 +194,9 @@ else {
 $resolvedDestDir = if ($PSBoundParameters.ContainsKey("DestDir")) {
     $DestDir
 }
+elseif ($UseCliOnly) {
+    $null
+}
 else {
     $v = Normalize-OptionalString (Get-OptionValue -Options $fileOptions -Name "DestDir")
     if ($null -ne $v) { $v } else { $null }
@@ -195,6 +204,9 @@ else {
 
 $resolvedExtensions = if ($PSBoundParameters.ContainsKey("Extensions")) {
     ConvertTo-NormalizedExtensionArray $Extensions
+}
+elseif ($UseCliOnly) {
+    $defaults.Extensions
 }
 else {
     $v = ConvertTo-NormalizedExtensionArray (Get-OptionValue -Options $fileOptions -Name "Extensions")

@@ -1,5 +1,7 @@
 {
   "StagingDir": "C:/path/to/staging",
   "HandbrakeDir": "C:/path/to/handbrake",
-  "FinalDir": "C:/path/to/final"
+  "FinalDir": "C:/path/to/final",
+  "Transcribe": false,
+  "TranscribeMaxFiles": 0
 }

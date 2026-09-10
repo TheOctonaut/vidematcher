@@ -6,6 +6,7 @@ Runs the full video processing pipeline in sequence:
 2. **vidmatch** — compare the handbrake folder against the final folder to find files not yet encoded
 3. **videncode** — encode the unmatched files via HandBrakeCLI and move outputs to the final folder
 4. **reconcile cleanup** — compare handbrake leftovers to final files by basename and enforce size rules
+5. **vidtranscribe** *(optional, disabled by default)* — generate subtitles/transcripts for files in the final folder via WhisperX
 
 Before step 1, dispatcher runs a **videncode preflight check** (dry-run, no changes) to validate
 HandBrakeCLI/preset configuration. If preflight fails, dispatcher exits before moving or deleting files.
@@ -16,6 +17,7 @@ HandBrakeCLI/preset configuration. If preflight fails, dispatcher exits before m
 - All three tool scripts present in the expected sibling subfolders (`vidpicker/`, `vidmatch/`, `videncode/`)
 - Each tool's `options.json` set up with its own settings (preset, extensions, etc.)
 - [HandBrake CLI](https://handbrake.fr/downloads2.php) configured in `videncode/options.json`
+- Optional: `vidtranscribe/` (with its own Docker/GPU setup — see `vidtranscribe/README.md`) if you enable the transcribe step
 
 ## Files
 
@@ -47,6 +49,9 @@ If the options file is missing, the script prompts to create it.
 | `VidpickerScript` | Override path to `vidpicker.ps1` (default: `../vidpicker/vidpicker.ps1`) |
 | `VidmatchScript` | Override path to `vidmatch.ps1` (default: `../vidmatch/vidmatch.ps1`) |
 | `VidencodeScript` | Override path to `videncode.ps1` (default: `../videncode/videncode.ps1`) |
+| `VidtranscribeScript` | Override path to `vidtranscribe.ps1` (default: `../vidtranscribe/vidtranscribe.ps1`) |
+| `Transcribe` | Enable the optional step 5 vidtranscribe pass over `FinalDir` (default: `false`) |
+| `TranscribeMaxFiles` | Cap the number of files vidtranscribe processes per dispatch run; `0` = no limit (default: `0`) |
 
 ## Parameters
 
@@ -59,6 +64,9 @@ If the options file is missing, the script prompts to create it.
 | `-VidpickerScript` | string | Override path to vidpicker.ps1 |
 | `-VidmatchScript` | string | Override path to vidmatch.ps1 |
 | `-VidencodeScript` | string | Override path to videncode.ps1 |
+| `-VidtranscribeScript` | string | Override path to vidtranscribe.ps1 |
+| `-Transcribe` | switch | Enable the optional step 5 vidtranscribe pass over `FinalDir` (default: disabled) |
+| `-TranscribeMaxFiles` | int | Cap the number of files vidtranscribe processes per dispatch run; `0` = no limit |
 | `-SkipPick` | switch | Skip the vidpicker step (useful if files are already in HandbrakeDir) |
 | `-DryRun` | switch | Propagate dry run to all tools; no files are moved or encoded |
 | `-NoConfirm` | switch | Propagate no-confirm to all tools; skip all confirmation prompts |
@@ -129,6 +137,12 @@ Use `-VerboseConsole` if you want the full legacy-style child output on screen.
 .\viddispatch.ps1 -NoConfirm -VerboseConsole
 ```
 
+### 8) Run the full pipeline including the optional transcribe step
+
+```powershell
+.\viddispatch.ps1 -NoConfirm -Transcribe -TranscribeMaxFiles 10
+```
+
 ## Pipeline Detail
 
 ### Step 1 - vidpicker
@@ -170,6 +184,20 @@ delete the handbrake source file.
 - If sizes are equal:
 keep the handbrake source file (no automatic deletion).
 
+### Step 5 (optional) - vidtranscribe
+
+Disabled by default. Enable with `-Transcribe` (CLI) or `"Transcribe": true` (options.json).
+
+When enabled, runs `vidtranscribe.ps1 -Path <FinalDir>` after reconcile cleanup, generating
+`.en.srt` subtitles (and auto-translating non-English audio to English) for video files in
+`FinalDir` that don't already have them. `-DryRun`/`-NoConfirm` are propagated automatically.
+`-TranscribeMaxFiles` caps how many files are processed in a single dispatch run (`0` = no limit).
+
+vidtranscribe requires its own Docker/GPU setup — see `vidtranscribe/README.md`. A failure in
+this step does not undo or block the already-completed pick/match/encode/reconcile work; it
+degrades the overall run status to `partial` instead of `ok`/`failed`, since transcription is
+best-effort metadata generation on top of an already-successful archival pipeline.
+
 ## Individual Tool Options
 
 Each tool reads its own `options.json` for encoding settings (preset, extensions, HandBrakeCLI path, etc.).
@@ -186,6 +214,7 @@ Each tool reads its own `options.json` for encoding settings (preset, extensions
 - `-DryRun` propagates to both: no files are moved or encoded.
 - A videncode preflight check runs first to ensure encode dependencies are available before destructive steps.
 - If any step fails (non-zero exit), the pipeline stops immediately.
+- The optional transcribe step (step 5) is the exception: it only runs if explicitly enabled, and a failure there does not stop or roll back the already-completed steps (see "Step 5 (optional) - vidtranscribe" above).
 - Detailed audit output is always preserved in the dispatcher debug log file.
 
 ## SUMMARY Output
@@ -193,14 +222,16 @@ Each tool reads its own `options.json` for encoding settings (preset, extensions
 The dispatcher emits one parseable line on every handled path:
 
 ```text
-SUMMARY|tool=viddispatch|status=ok|dry_run=false|skip_pick=false|picked=N|unmatched=N|encoded=N|encode_failed=N|moved=N|move_failed=N|move_deferred=N|pending_moved=N|reconcile_inspected=N|reconcile_replaced_inflated=N|reconcile_deleted_final_inflated=N|reconcile_deleted_handbrake_smaller=N|reconcile_kept_equal=N|reconcile_missing_final_match=N|reconcile_errors=N
+SUMMARY|tool=viddispatch|status=ok|dry_run=false|skip_pick=false|picked=N|unmatched=N|encoded=N|encode_failed=N|moved=N|move_failed=N|move_deferred=N|pending_moved=N|reconcile_inspected=N|reconcile_replaced_inflated=N|reconcile_deleted_final_inflated=N|reconcile_deleted_handbrake_smaller=N|reconcile_kept_equal=N|reconcile_missing_final_match=N|reconcile_errors=N|transcribe_enabled=false|transcribed=N|transcribe_translated_only=N|transcribe_failed=N|transcribe_skipped=N
 ```
 
 Status values: `ok`, `noop`, `partial`, `failed`, `aborted`
 
-- `partial` — encode succeeded but some outputs could not be moved to `FinalDir` (e.g. destination full); they are held in `.videncode-ready` for the next run. Treated as success by the dispatcher; reconcile still runs.
+- `partial` — either encode succeeded but some outputs could not be moved to `FinalDir` (held in `.videncode-ready` for the next run), or the optional transcribe step (step 5) failed after every other step succeeded. Treated as success by the dispatcher; reconcile (and, if enabled, transcribe) still runs.
 - `move_deferred` — count of files held in `.videncode-ready` due to insufficient space in `FinalDir`.
 - `pending_moved` — count of files flushed from `.videncode-ready` to `FinalDir` at the start of this run.
+- `transcribe_enabled` — whether step 5 was enabled for this run (`-Transcribe` / `Transcribe` option).
+- `transcribed` / `transcribe_translated_only` / `transcribe_failed` / `transcribe_skipped` — counts reported by vidtranscribe's own summary; all `0` when the step is disabled.
 
 ## Options File Example
 
@@ -210,7 +241,9 @@ Status values: `ok`, `noop`, `partial`, `failed`, `aborted`
 {
   "StagingDir": "C:/path/to/staging",
   "HandbrakeDir": "C:/path/to/handbrake",
-  "FinalDir": "C:/path/to/final"
+  "FinalDir": "C:/path/to/final",
+  "Transcribe": false,
+  "TranscribeMaxFiles": 0
 }
 ```
 
@@ -219,3 +252,4 @@ Status values: `ok`, `noop`, `partial`, `failed`, `aborted`
 - `videncode/options.json` must be configured separately with the HandBrake preset and path settings.
 - vidmatch and videncode both independently skip files already present in `FinalDir` (by basename). This means even if a file appears in the unmatched list from vidmatch, videncode will skip it if it was moved to `FinalDir` between the two steps.
 - Source files in `HandbrakeDir` are never deleted by videncode. They remain after encoding.
+- The optional vidtranscribe step (step 5) is disabled by default and only runs when `-Transcribe`/`Transcribe` is set. `vidtranscribe/options.json` must be configured separately (Docker image, models path, etc.) — see `vidtranscribe/README.md`.

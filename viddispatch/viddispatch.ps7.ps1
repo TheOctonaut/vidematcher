@@ -21,6 +21,9 @@ param(
     [string]$VidencodeScript,
 
     [Parameter(Mandatory = $false)]
+    [string]$VidtranscribeScript,
+
+    [Parameter(Mandatory = $false)]
     [string]$PresetName,
 
     [Parameter(Mandatory = $false)]
@@ -28,6 +31,12 @@ param(
 
     [Parameter(Mandatory = $false)]
     [switch]$SkipPick,
+
+    [Parameter(Mandatory = $false)]
+    [switch]$Transcribe,
+
+    [Parameter(Mandatory = $false)]
+    [int]$TranscribeMaxFiles,
 
     [Parameter(Mandatory = $false)]
     [switch]$DryRun,
@@ -226,7 +235,11 @@ function Show-FinalScorecard {
         [Parameter(Mandatory = $true)][int]$ReconcileReplacedInflated,
         [Parameter(Mandatory = $true)][int]$ReconcileDeletedSmaller,
         [Parameter(Mandatory = $true)][int]$ReconcileKeptEqual,
-        [Parameter(Mandatory = $true)][int]$ReconcileErrors
+        [Parameter(Mandatory = $true)][int]$ReconcileErrors,
+        [Parameter(Mandatory = $false)][string]$TranscribeEnabled = "false",
+        [Parameter(Mandatory = $false)][int]$Transcribed = 0,
+        [Parameter(Mandatory = $false)][int]$TranscribeTranslatedOnly = 0,
+        [Parameter(Mandatory = $false)][int]$TranscribeFailed = 0
     )
 
     Write-Host ""
@@ -239,6 +252,9 @@ function Show-FinalScorecard {
         Write-Host ("  move_deferred/pending_moved: {0}/{1}" -f $MoveDeferred, $PendingMoved)
     }
     Write-Host ("  reconcile inspected/replaced/deleted_smaller/kept_equal/errors: {0}/{1}/{2}/{3}/{4}" -f $ReconcileInspected, $ReconcileReplacedInflated, $ReconcileDeletedSmaller, $ReconcileKeptEqual, $ReconcileErrors)
+    if ($TranscribeEnabled -eq "true") {
+        Write-Host ("  transcribe (transcribed/translated_only/failed): {0}/{1}/{2}" -f $Transcribed, $TranscribeTranslatedOnly, $TranscribeFailed)
+    }
 }
 
 function Escape-Argument {
@@ -740,6 +756,26 @@ $resolvedVidencodeScript = if ($PSBoundParameters.ContainsKey("VidencodeScript")
     Normalize-OptionalString (Get-OptionValue -Options $fileOptions -Name "VidencodeScript")
 }
 
+$resolvedVidtranscribeScript = if ($PSBoundParameters.ContainsKey("VidtranscribeScript")) {
+    $VidtranscribeScript
+} else {
+    Normalize-OptionalString (Get-OptionValue -Options $fileOptions -Name "VidtranscribeScript")
+}
+
+$resolvedEnableTranscribe = if ($Transcribe.IsPresent) {
+    $true
+} else {
+    $optTranscribeEnabled = Get-OptionValue -Options $fileOptions -Name "Transcribe"
+    if ($null -eq $optTranscribeEnabled) { $false } else { [bool]$optTranscribeEnabled }
+}
+
+$resolvedTranscribeMaxFiles = if ($PSBoundParameters.ContainsKey("TranscribeMaxFiles")) {
+    $TranscribeMaxFiles
+} else {
+    $optTranscribeMaxFiles = Get-OptionValue -Options $fileOptions -Name "TranscribeMaxFiles"
+    if ($null -eq $optTranscribeMaxFiles) { 0 } else { [int]$optTranscribeMaxFiles }
+}
+
 $resolvedPresetName = if ($PSBoundParameters.ContainsKey("PresetName")) {
     Normalize-OptionalString $PresetName
 } else {
@@ -763,6 +799,9 @@ if ([string]::IsNullOrWhiteSpace($resolvedVidmatchScript)) {
 }
 if ([string]::IsNullOrWhiteSpace($resolvedVidencodeScript)) {
     $resolvedVidencodeScript = Join-Path $repoRoot "videncode\videncode.ps7.ps1"
+}
+if ([string]::IsNullOrWhiteSpace($resolvedVidtranscribeScript)) {
+    $resolvedVidtranscribeScript = Join-Path $repoRoot "vidtranscribe\vidtranscribe.ps1"
 }
 
 # ---------------------------------------------------------------------------
@@ -797,6 +836,10 @@ foreach ($entry in @(
     }
 }
 
+if ($resolvedEnableTranscribe -and -not (Test-Path -LiteralPath $resolvedVidtranscribeScript -PathType Leaf)) {
+    throw "VidtranscribeScript not found: $resolvedVidtranscribeScript (required because the Transcribe step is enabled via -Transcribe or options.json)"
+}
+
  $resolvedStagingDir = Convert-HostPathToContainerPath -PathValue $resolvedStagingDir
  $resolvedHandbrakeDir = Convert-HostPathToContainerPath -PathValue $resolvedHandbrakeDir
  $resolvedFinalDir = Convert-HostPathToContainerPath -PathValue $resolvedFinalDir
@@ -817,6 +860,7 @@ if (-not (Test-Path -LiteralPath $resolvedFinalDir -PathType Container)) {
 
 $dryRunFlag  = if ($DryRun.IsPresent)   { "true" } else { "false" }
 $skipPickFlag = if ($SkipPick.IsPresent) { "true" } else { "false" }
+$transcribeEnabledFlag = if ($resolvedEnableTranscribe) { "true" } else { "false" }
 $script:DispatchDebugLogPath = Initialize-DebugLogPath -RequestedPath $DebugLogPath
 
 Write-Progress -Activity "viddispatch pipeline" -Completed
@@ -826,6 +870,7 @@ Write-Host "  HandbrakeDir: $resolvedHandbrakeDir"
 Write-Host "  FinalDir:     $resolvedFinalDir"
 if ($DryRun)   { Write-Host "  [DRY RUN]" }
 if ($SkipPick) { Write-Host "  [SKIP PICK]" }
+if ($resolvedEnableTranscribe) { Write-Host "  [TRANSCRIBE ENABLED]" }
 Write-Host ("  Debug log:    {0}" -f $script:DispatchDebugLogPath)
 if (-not $VerboseConsole) { Write-Host "  Console mode: clean (use -VerboseConsole for full child output)" }
 Write-DebugLog "viddispatch session started"
@@ -833,11 +878,13 @@ $pipelineWatch = [System.Diagnostics.Stopwatch]::StartNew()
 
 if (-not $DryRun -and -not $NoConfirm) {
     Write-Host ""
-    Write-Host "This will run pick -> match -> encode -> reconcile cleanup."
+    $pipelineDescription = "This will run pick -> match -> encode -> reconcile cleanup."
+    if ($resolvedEnableTranscribe) { $pipelineDescription = "This will run pick -> match -> encode -> reconcile cleanup -> transcribe." }
+    Write-Host $pipelineDescription
     $dispatchConfirm = Read-Host "Proceed? (Y/N)"
     if ($dispatchConfirm -notmatch '^[Yy]') {
         Write-Host "Aborted."
-        Write-Host "SUMMARY|tool=viddispatch|status=aborted|dry_run=false|skip_pick=$skipPickFlag|note=user_aborted"
+        Write-Host "SUMMARY|tool=viddispatch|status=aborted|dry_run=false|skip_pick=$skipPickFlag|transcribe_enabled=$transcribeEnabledFlag|transcribed=0|transcribe_translated_only=0|transcribe_failed=0|note=user_aborted"
         exit 0
     }
 }
@@ -886,7 +933,7 @@ if ($preflightResult.ExitCode -ne 0) {
     Show-FinalScorecard -Status "failed" -TotalSeconds $pipelineWatch.Elapsed.TotalSeconds -Picked $dispatchPickedCount -Unmatched 0 -Encoded $dispatchEncoded -EncodeFailed $dispatchEncodeFailed -Moved $dispatchMoved -MoveFailed $dispatchMoveFailed -ReconcileInspected 0 -ReconcileReplacedInflated 0 -ReconcileDeletedSmaller 0 -ReconcileKeptEqual 0 -ReconcileErrors 0
     Show-StepProgress -Percent 100 -Status "Failed"
     Write-Progress -Activity "viddispatch pipeline" -Completed
-    Write-Host "SUMMARY|tool=viddispatch|status=failed|dry_run=$dryRunFlag|skip_pick=$skipPickFlag|note=preflight_videncode_failed"
+    Write-Host "SUMMARY|tool=viddispatch|status=failed|dry_run=$dryRunFlag|skip_pick=$skipPickFlag|transcribe_enabled=$transcribeEnabledFlag|transcribed=0|transcribe_translated_only=0|transcribe_failed=0|note=preflight_videncode_failed"
     exit 1
 }
 Show-StepResult -Step "Preflight" -Result "OK" -Detail "encode command accepted" -Seconds $preflightSeconds
@@ -923,7 +970,7 @@ if (-not $SkipPick) {
         Show-FinalScorecard -Status "failed" -TotalSeconds $pipelineWatch.Elapsed.TotalSeconds -Picked $dispatchPickedCount -Unmatched 0 -Encoded $dispatchEncoded -EncodeFailed $dispatchEncodeFailed -Moved $dispatchMoved -MoveFailed $dispatchMoveFailed -ReconcileInspected 0 -ReconcileReplacedInflated 0 -ReconcileDeletedSmaller 0 -ReconcileKeptEqual 0 -ReconcileErrors 0
         Show-StepProgress -Percent 100 -Status "Failed"
         Write-Progress -Activity "viddispatch pipeline" -Completed
-        Write-Host "SUMMARY|tool=viddispatch|status=failed|dry_run=$dryRunFlag|skip_pick=$skipPickFlag|note=vidpicker_failed"
+        Write-Host "SUMMARY|tool=viddispatch|status=failed|dry_run=$dryRunFlag|skip_pick=$skipPickFlag|transcribe_enabled=$transcribeEnabledFlag|transcribed=0|transcribe_translated_only=0|transcribe_failed=0|note=vidpicker_failed"
         exit 1
     }
 
@@ -977,7 +1024,7 @@ try {
         Show-FinalScorecard -Status "failed" -TotalSeconds $pipelineWatch.Elapsed.TotalSeconds -Picked $dispatchPickedCount -Unmatched $dispatchUnmatchedCount -Encoded $dispatchEncoded -EncodeFailed $dispatchEncodeFailed -Moved $dispatchMoved -MoveFailed $dispatchMoveFailed -ReconcileInspected 0 -ReconcileReplacedInflated 0 -ReconcileDeletedSmaller 0 -ReconcileKeptEqual 0 -ReconcileErrors 0
         Show-StepProgress -Percent 100 -Status "Failed"
         Write-Progress -Activity "viddispatch pipeline" -Completed
-        Write-Host "SUMMARY|tool=viddispatch|status=failed|dry_run=$dryRunFlag|skip_pick=$skipPickFlag|note=vidmatch_failed"
+        Write-Host "SUMMARY|tool=viddispatch|status=failed|dry_run=$dryRunFlag|skip_pick=$skipPickFlag|transcribe_enabled=$transcribeEnabledFlag|transcribed=0|transcribe_translated_only=0|transcribe_failed=0|note=vidmatch_failed"
         exit 1
     }
 
@@ -1096,7 +1143,7 @@ try {
             Show-FinalScorecard -Status "aborted" -TotalSeconds $pipelineWatch.Elapsed.TotalSeconds -Picked $dispatchPickedCount -Unmatched $dispatchUnmatchedCount -Encoded $dispatchEncoded -EncodeFailed $dispatchEncodeFailed -Moved $dispatchMoved -MoveFailed $dispatchMoveFailed -ReconcileInspected 0 -ReconcileReplacedInflated 0 -ReconcileDeletedSmaller 0 -ReconcileKeptEqual 0 -ReconcileErrors 0
             Show-StepProgress -Percent 100 -Status "Aborted"
             Write-Progress -Activity "viddispatch pipeline" -Completed
-            Write-Host "SUMMARY|tool=viddispatch|status=aborted|dry_run=$dryRunFlag|skip_pick=$skipPickFlag|picked=$dispatchPickedCount|unmatched=$dispatchUnmatchedCount|encoded=$dispatchEncoded|encode_failed=$dispatchEncodeFailed|moved=$dispatchMoved|move_failed=$dispatchMoveFailed|move_deferred=$dispatchMoveDeferred|pending_moved=$dispatchPendingMoved|reconcile_inspected=0|reconcile_replaced_inflated=0|reconcile_deleted_final_inflated=0|reconcile_deleted_handbrake_smaller=0|reconcile_kept_equal=0|reconcile_missing_final_match=0|reconcile_errors=0|note=user_interrupted"
+            Write-Host "SUMMARY|tool=viddispatch|status=aborted|dry_run=$dryRunFlag|skip_pick=$skipPickFlag|picked=$dispatchPickedCount|unmatched=$dispatchUnmatchedCount|encoded=$dispatchEncoded|encode_failed=$dispatchEncodeFailed|moved=$dispatchMoved|move_failed=$dispatchMoveFailed|move_deferred=$dispatchMoveDeferred|pending_moved=$dispatchPendingMoved|reconcile_inspected=0|reconcile_replaced_inflated=0|reconcile_deleted_final_inflated=0|reconcile_deleted_handbrake_smaller=0|reconcile_kept_equal=0|reconcile_missing_final_match=0|reconcile_errors=0|transcribe_enabled=$transcribeEnabledFlag|transcribed=0|transcribe_translated_only=0|transcribe_failed=0|note=user_interrupted"
             exit 130
         }
 
@@ -1141,7 +1188,7 @@ try {
             Show-FinalScorecard -Status "failed" -TotalSeconds $pipelineWatch.Elapsed.TotalSeconds -Picked $dispatchPickedCount -Unmatched $dispatchUnmatchedCount -Encoded $dispatchEncoded -EncodeFailed $dispatchEncodeFailed -Moved $dispatchMoved -MoveFailed $dispatchMoveFailed -ReconcileInspected 0 -ReconcileReplacedInflated 0 -ReconcileDeletedSmaller 0 -ReconcileKeptEqual 0 -ReconcileErrors 0
             Show-StepProgress -Percent 100 -Status "Failed"
             Write-Progress -Activity "viddispatch pipeline" -Completed
-            Write-Host "SUMMARY|tool=viddispatch|status=failed|dry_run=$dryRunFlag|skip_pick=$skipPickFlag|picked=$dispatchPickedCount|unmatched=$dispatchUnmatchedCount|encoded=$dispatchEncoded|encode_failed=$dispatchEncodeFailed|moved=$dispatchMoved|move_failed=$dispatchMoveFailed|move_deferred=$dispatchMoveDeferred|pending_moved=$dispatchPendingMoved|reconcile_inspected=0|reconcile_replaced_inflated=0|reconcile_deleted_final_inflated=0|reconcile_deleted_handbrake_smaller=0|reconcile_kept_equal=0|reconcile_missing_final_match=0|reconcile_errors=0"
+            Write-Host "SUMMARY|tool=viddispatch|status=failed|dry_run=$dryRunFlag|skip_pick=$skipPickFlag|picked=$dispatchPickedCount|unmatched=$dispatchUnmatchedCount|encoded=$dispatchEncoded|encode_failed=$dispatchEncodeFailed|moved=$dispatchMoved|move_failed=$dispatchMoveFailed|move_deferred=$dispatchMoveDeferred|pending_moved=$dispatchPendingMoved|reconcile_inspected=0|reconcile_replaced_inflated=0|reconcile_deleted_final_inflated=0|reconcile_deleted_handbrake_smaller=0|reconcile_kept_equal=0|reconcile_missing_final_match=0|reconcile_errors=0|transcribe_enabled=$transcribeEnabledFlag|transcribed=0|transcribe_translated_only=0|transcribe_failed=0"
             exit 1
         }
 
@@ -1162,9 +1209,116 @@ try {
     $reconcileSeconds = Stop-StepTimer -Timer $reconcileWatch
     Show-StepResult -Step "Reconcile" -Result "OK" -Detail ("inspected={0} replaced_inflated={1} deleted_smaller={2} kept_equal={3}" -f $reconcile.inspected, $reconcile.replaced_inflated, $reconcile.deleted_handbrake_smaller_final, $reconcile.kept_equal) -Seconds $reconcileSeconds
 
-    $didWork = ($dispatchUnmatchedCount -gt 0 -or $dispatchEncoded -gt 0 -or $dispatchMoved -gt 0 -or $dispatchMoveDeferred -gt 0 -or $dispatchPendingMoved -gt 0 -or $reconcile.replaced_inflated -gt 0 -or $reconcile.deleted_handbrake_smaller_final -gt 0)
+    # ---------------------------------------------------------------------------
+    # STEP 5 (optional): vidtranscribe pass over FinalDir (subtitle generation)
+    # ---------------------------------------------------------------------------
+
+    $dispatchTranscribed = 0
+    $dispatchTranscribeTranslatedOnly = 0
+    $dispatchTranscribeFailed = 0
+    $dispatchTranscribeSkipped = 0
+    $transcribeHadFailure = $false
+
+    if ($resolvedEnableTranscribe) {
+        Show-StepProgress -Percent 85 -Status "Transcribing subtitles"
+
+        $transcribeArgs = @(
+            "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", (Escape-Argument -Value $resolvedVidtranscribeScript),
+            "-Path", (Escape-Argument -Value $resolvedFinalDir)
+        )
+        if ($resolvedTranscribeMaxFiles -gt 0) {
+            $transcribeArgs += @("-MaxFiles", "$resolvedTranscribeMaxFiles")
+        }
+        if ($DryRun) { $transcribeArgs += "-DryRun" }
+        if ($NoConfirm) { $transcribeArgs += "-NoConfirm" }
+
+        $transcribeState = @{ Index = 0; Total = 0 }
+        $onTranscribeStdout = {
+            param($line)
+            if ($line.StartsWith("PROGRESS|")) {
+                $map = ConvertTo-KeyValueMap -Line $line
+                $idx = Get-MapIntValue -Map $map -Key "index" -Default $transcribeState.Index
+                $tot = Get-MapIntValue -Map $map -Key "total" -Default $transcribeState.Total
+                $transcribeState.Index = $idx
+                $transcribeState.Total = $tot
+                if ($tot -gt 0) {
+                    $pct = 85 + [math]::Min(14, [math]::Round((14.0 * $idx) / $tot))
+                    Show-StepProgress -Percent $pct -Status ("Transcribing {0}/{1}: {2}" -f $idx, $tot, $map["file"])
+                }
+            }
+            elseif ($VerboseConsole -and -not $line.StartsWith("SUMMARY|")) {
+                Write-DispatchDetail -AlwaysConsole -Message $line
+            }
+            Write-DebugLog ("STDOUT tool=vidtranscribe: {0}" -f $line)
+        }.GetNewClosure()
+        $onTranscribeStderr = {
+            param($line)
+            if ($VerboseConsole) { Write-DispatchDetail -Warning -AlwaysConsole -Message $line }
+            Write-DebugLog ("STDERR tool=vidtranscribe: {0}" -f $line)
+        }.GetNewClosure()
+
+        $transcribeWatch = Start-StepTimer
+        try {
+            $transcribeResult = Invoke-ToolScriptStreaming -Label "vidtranscribe" -Exe $psExe -Arguments $transcribeArgs -OnStdoutLine $onTranscribeStdout -OnStderrLine $onTranscribeStderr
+        }
+        catch [System.Management.Automation.PipelineStoppedException] {
+            Stop-ActiveToolProcess
+            Show-StepResult -Step "Transcribe" -Result "FAIL" -Detail "interrupted by user"
+            $pipelineWatch.Stop()
+            Show-StepProgress -Percent 100 -Status "Aborted"
+            Write-Progress -Activity "viddispatch pipeline" -Completed
+            Write-Host "SUMMARY|tool=viddispatch|status=aborted|dry_run=$dryRunFlag|skip_pick=$skipPickFlag|picked=$dispatchPickedCount|unmatched=$dispatchUnmatchedCount|encoded=$dispatchEncoded|encode_failed=$dispatchEncodeFailed|moved=$dispatchMoved|move_failed=$dispatchMoveFailed|move_deferred=$dispatchMoveDeferred|pending_moved=$dispatchPendingMoved|reconcile_inspected=$($reconcile.inspected)|reconcile_replaced_inflated=$($reconcile.replaced_inflated)|reconcile_deleted_final_inflated=$($reconcile.deleted_final_inflated)|reconcile_deleted_handbrake_smaller=$($reconcile.deleted_handbrake_smaller_final)|reconcile_kept_equal=$($reconcile.kept_equal)|reconcile_missing_final_match=$($reconcile.missing_final_match)|reconcile_errors=$($reconcile.cleanup_errors)|transcribe_enabled=$transcribeEnabledFlag|transcribed=0|transcribe_translated_only=0|transcribe_failed=0|note=user_interrupted"
+            exit 130
+        }
+        $transcribeSeconds = Stop-StepTimer -Timer $transcribeWatch
+
+        if (-not [string]::IsNullOrWhiteSpace($transcribeResult.Summary)) {
+            $v = Get-SummaryField -Summary $transcribeResult.Summary -Field "processed"
+            if ($null -ne $v) { $dispatchTranscribed = [int]$v }
+            $v = Get-SummaryField -Summary $transcribeResult.Summary -Field "translated_only"
+            if ($null -ne $v) { $dispatchTranscribeTranslatedOnly = [int]$v }
+            $v = Get-SummaryField -Summary $transcribeResult.Summary -Field "failed"
+            if ($null -ne $v) { $dispatchTranscribeFailed = [int]$v }
+            $v = Get-SummaryField -Summary $transcribeResult.Summary -Field "skipped"
+            if ($null -ne $v) { $dispatchTranscribeSkipped = [int]$v }
+        }
+
+        $transcribeSummaryStatus = $null
+        if (-not [string]::IsNullOrWhiteSpace($transcribeResult.Summary)) {
+            $transcribeSummaryStatus = Get-SummaryField -Summary $transcribeResult.Summary -Field "status"
+        }
+        $transcribeSucceeded = ($transcribeSummaryStatus -eq "ok" -or $transcribeSummaryStatus -eq "noop") -or
+                               ($null -eq $transcribeSummaryStatus -and $transcribeResult.ExitCode -eq 0)
+        if (-not $transcribeSucceeded) {
+            $transcribeHadFailure = $true
+            $transcribeFailDetail = if (-not [string]::IsNullOrWhiteSpace($transcribeSummaryStatus)) {
+                "vidtranscribe status=$transcribeSummaryStatus"
+            } else {
+                $transcribeExitCodeText = if ($null -eq $transcribeResult.ExitCode -or [string]::IsNullOrWhiteSpace([string]$transcribeResult.ExitCode)) { "non-zero" } else { [string]$transcribeResult.ExitCode }
+                "vidtranscribe exited $transcribeExitCodeText"
+            }
+            # Non-fatal: pick/match/encode/reconcile already completed successfully. Transcription
+            # is best-effort metadata generation, so a failure here degrades the run to "partial"
+            # rather than aborting or discarding already-completed archival work.
+            Show-StepResult -Step "Transcribe" -Result "FAIL" -Detail $transcribeFailDetail -Seconds $transcribeSeconds
+            if (-not [string]::IsNullOrWhiteSpace($transcribeResult.Stdout)) {
+                Write-DispatchDetail -Warning -AlwaysConsole -Message ($transcribeResult.Stdout -replace "\r?\n", [Environment]::NewLine)
+            }
+            if (-not [string]::IsNullOrWhiteSpace($transcribeResult.Stderr)) {
+                Write-DispatchDetail -Warning -AlwaysConsole -Message ($transcribeResult.Stderr -replace "\r?\n", [Environment]::NewLine)
+            }
+        }
+        else {
+            Show-StepResult -Step "Transcribe" -Result "OK" -Detail ("transcribed={0} translated_only={1} failed={2} skipped={3}" -f $dispatchTranscribed, $dispatchTranscribeTranslatedOnly, $dispatchTranscribeFailed, $dispatchTranscribeSkipped) -Seconds $transcribeSeconds
+        }
+    }
+
+    $didWork = ($dispatchUnmatchedCount -gt 0 -or $dispatchEncoded -gt 0 -or $dispatchMoved -gt 0 -or $dispatchMoveDeferred -gt 0 -or $dispatchPendingMoved -gt 0 -or $reconcile.replaced_inflated -gt 0 -or $reconcile.deleted_handbrake_smaller_final -gt 0 -or $dispatchTranscribed -gt 0 -or $dispatchTranscribeTranslatedOnly -gt 0)
     $status = if ($DryRun) {
         "noop"
+    }
+    elseif ($transcribeHadFailure) {
+        "partial"
     }
     elseif ($didWork) {
         "ok"
@@ -1176,8 +1330,8 @@ try {
     Show-StepProgress -Percent 100 -Status "Complete"
     Write-Progress -Activity "viddispatch pipeline" -Completed
     $pipelineWatch.Stop()
-    Show-FinalScorecard -Status $status -TotalSeconds $pipelineWatch.Elapsed.TotalSeconds -Picked $dispatchPickedCount -Unmatched $dispatchUnmatchedCount -Encoded $dispatchEncoded -EncodeFailed $dispatchEncodeFailed -Moved $dispatchMoved -MoveFailed $dispatchMoveFailed -MoveDeferred $dispatchMoveDeferred -PendingMoved $dispatchPendingMoved -ReconcileInspected $reconcile.inspected -ReconcileReplacedInflated $reconcile.replaced_inflated -ReconcileDeletedSmaller $reconcile.deleted_handbrake_smaller_final -ReconcileKeptEqual $reconcile.kept_equal -ReconcileErrors $reconcile.cleanup_errors
-    Write-Host "SUMMARY|tool=viddispatch|status=$status|dry_run=$dryRunFlag|skip_pick=$skipPickFlag|picked=$dispatchPickedCount|unmatched=$dispatchUnmatchedCount|encoded=$dispatchEncoded|encode_failed=$dispatchEncodeFailed|moved=$dispatchMoved|move_failed=$dispatchMoveFailed|move_deferred=$dispatchMoveDeferred|pending_moved=$dispatchPendingMoved|reconcile_inspected=$($reconcile.inspected)|reconcile_replaced_inflated=$($reconcile.replaced_inflated)|reconcile_deleted_final_inflated=$($reconcile.deleted_final_inflated)|reconcile_deleted_handbrake_smaller=$($reconcile.deleted_handbrake_smaller_final)|reconcile_kept_equal=$($reconcile.kept_equal)|reconcile_missing_final_match=$($reconcile.missing_final_match)|reconcile_errors=$($reconcile.cleanup_errors)"
+    Show-FinalScorecard -Status $status -TotalSeconds $pipelineWatch.Elapsed.TotalSeconds -Picked $dispatchPickedCount -Unmatched $dispatchUnmatchedCount -Encoded $dispatchEncoded -EncodeFailed $dispatchEncodeFailed -Moved $dispatchMoved -MoveFailed $dispatchMoveFailed -MoveDeferred $dispatchMoveDeferred -PendingMoved $dispatchPendingMoved -ReconcileInspected $reconcile.inspected -ReconcileReplacedInflated $reconcile.replaced_inflated -ReconcileDeletedSmaller $reconcile.deleted_handbrake_smaller_final -ReconcileKeptEqual $reconcile.kept_equal -ReconcileErrors $reconcile.cleanup_errors -TranscribeEnabled $transcribeEnabledFlag -Transcribed $dispatchTranscribed -TranscribeTranslatedOnly $dispatchTranscribeTranslatedOnly -TranscribeFailed $dispatchTranscribeFailed
+    Write-Host "SUMMARY|tool=viddispatch|status=$status|dry_run=$dryRunFlag|skip_pick=$skipPickFlag|picked=$dispatchPickedCount|unmatched=$dispatchUnmatchedCount|encoded=$dispatchEncoded|encode_failed=$dispatchEncodeFailed|moved=$dispatchMoved|move_failed=$dispatchMoveFailed|move_deferred=$dispatchMoveDeferred|pending_moved=$dispatchPendingMoved|reconcile_inspected=$($reconcile.inspected)|reconcile_replaced_inflated=$($reconcile.replaced_inflated)|reconcile_deleted_final_inflated=$($reconcile.deleted_final_inflated)|reconcile_deleted_handbrake_smaller=$($reconcile.deleted_handbrake_smaller_final)|reconcile_kept_equal=$($reconcile.kept_equal)|reconcile_missing_final_match=$($reconcile.missing_final_match)|reconcile_errors=$($reconcile.cleanup_errors)|transcribe_enabled=$transcribeEnabledFlag|transcribed=$dispatchTranscribed|transcribe_translated_only=$dispatchTranscribeTranslatedOnly|transcribe_failed=$dispatchTranscribeFailed|transcribe_skipped=$dispatchTranscribeSkipped"
 }
 finally {
     if (Test-Path -LiteralPath $tempCsvPath) {

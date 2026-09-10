@@ -21,7 +21,10 @@ param(
     [string[]]$SourceExtensions,
 
     [Parameter(Mandatory = $false)]
-    [string[]]$TargetExtensions
+    [string[]]$TargetExtensions,
+
+    [Parameter(Mandatory = $false)]
+    [switch]$UseCliOnly
 )
 
 $ErrorActionPreference = "Stop"
@@ -176,7 +179,7 @@ $defaults = [PSCustomObject]@{
 
 $exampleOptionsFile = Join-Path $scriptRoot $exampleOptionsFileName
 
-if (-not (Test-Path -LiteralPath $OptionsFile -PathType Leaf)) {
+if (-not $UseCliOnly -and -not (Test-Path -LiteralPath $OptionsFile -PathType Leaf)) {
     if ($NoConfirm -and -not $optionsFileExplicit) {
         Write-Host "Options file not found: $OptionsFile (continuing without it)"
     }

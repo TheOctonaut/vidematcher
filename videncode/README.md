@@ -77,6 +77,7 @@ Required:
 | `-SourceExtensions` | string[] | Extensions to include when scanning SourceDir |
 | `-DryRun` | switch | Preview what would be encoded without running anything |
 | `-NoConfirm` | switch | Skip the confirmation prompt (also skips the options file creation prompt when the default options file is missing) |
+| `-UseCliOnly` | switch | Skip reading `options.json` entirely; use only CLI-supplied values and built-in defaults. Intended for orchestration callers (e.g. `viddispatch`) that supply all settings themselves. |
 
 ## Common Command Line Usage
 
