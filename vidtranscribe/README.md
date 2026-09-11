@@ -105,10 +105,10 @@ WhisperX's built-in language auto-detection only looks at the raw first ~30 seco
 To avoid this, whenever no `-Language` is forced (and the file isn't `TranslateOnly`), a cheap pre-check runs before the real transcription:
 
 1. `ffmpeg`/`ffprobe`, plus WhisperX's own voice-activity-detection (VAD) model (run standalone via a small helper script, `vad_probe.py`), find where the file actually contains speech across its *entire* runtime - not just a fixed offset or percentage.
-2. One genuine speech window (~45s) is picked from the first half of the runtime and one from the second half, each extracted with `ffmpeg` and run through a fast pass (`--model tiny --no_align`) just to read back the language WhisperX detects for it.
-3. If both windows agree, that language is used for the real transcription. If they disagree, either window can't be found, or either probe fails, the script falls back to WhisperX's normal full-file auto-detection (i.e. no worse than before this feature existed) and prints a note explaining why.
+2. One genuine speech window (~45s) is picked from each third of the runtime (first/middle/last), each extracted with `ffmpeg` and run through a fast pass (`--model tiny --no_align`) just to read back the language WhisperX detects for it.
+3. If two or three windows agree, that majority language is used for the real transcription. A genuine three-way split (all different) falls back to English if English was one of the three guesses - a fair default for this library, where short/ambiguous dialogue (e.g. brief or non-verbal audio) is disproportionately likely to actually be English even when a probe window misreads it as something else. If English wasn't among the guesses, or fewer than two windows could be probed at all (e.g. no speech found in a given third), the script falls back to WhisperX's normal full-file auto-detection (i.e. no worse than before this feature existed) and prints a note explaining why.
 
-This adds two small `tiny`-model passes per file (a few seconds each) plus one lightweight VAD pass, which is negligible next to the main transcription pass. The container needs the repo's `vad_probe.py` mounted alongside the input/output volumes to run this - handled automatically by the script, nothing to configure.
+This adds up to three small `tiny`-model passes per file (a few seconds each) plus one lightweight VAD pass, which is negligible next to the main transcription pass. The container needs the repo's `vad_probe.py` mounted alongside the input/output volumes to run this - handled automatically by the script, nothing to configure.
 
 ### A second, independent bug: mislabeled output regardless of detection accuracy
 

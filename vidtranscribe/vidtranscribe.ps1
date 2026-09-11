@@ -411,10 +411,12 @@ function Get-ProbedLanguage {
     # percentage into the runtime) can still land on a stretch with no real
     # dialogue. Instead, this runs WhisperX's own voice-activity detector once
     # across the whole file to find where speech actually is, then probes
-    # language in one genuine-speech window from the first half of the
-    # runtime and one from the second half; if both agree, the language is
-    # trusted, otherwise (or on any failure) the caller falls back to
-    # WhisperX's normal full-file auto-detection.
+    # language in one genuine-speech window from each third of the runtime.
+    # Two or three agreeing windows win by majority. A genuine three-way
+    # split falls back to English if English was one of the guesses (a fair
+    # default for this library, where most short/ambiguous dialogue turns
+    # out to be English) - otherwise the caller falls back to WhisperX's
+    # normal full-file auto-detection.
     param(
         [Parameter(Mandatory = $true)][string]$FilePath,
         [Parameter(Mandatory = $true)][string]$ModelsPath,
@@ -436,29 +438,36 @@ function Get-ProbedLanguage {
         return $null
     }
 
-    $midpoint = $duration / 2
-    $window1 = Select-SpeechClipWindow -Segments $segments -ClipSeconds $ClipSeconds -MinStart 0 -MaxEnd $midpoint
-    $window2 = Select-SpeechClipWindow -Segments $segments -ClipSeconds $ClipSeconds -MinStart $midpoint -MaxEnd $duration
+    $third = $duration / 3
+    $ranges = @(
+        @{ MinStart = 0; MaxEnd = $third },
+        @{ MinStart = $third; MaxEnd = 2 * $third },
+        @{ MinStart = 2 * $third; MaxEnd = $duration }
+    )
 
-    $lang1 = if ($null -ne $window1) {
-        Get-LanguageForClip -FilePath $FilePath -OffsetSeconds $window1.Start -ClipSeconds ($window1.End - $window1.Start) -ModelsPath $ModelsPath -DockerImage $DockerImage -Device $Device -ComputeType $ComputeType
+    $samples = foreach ($range in $ranges) {
+        $window = Select-SpeechClipWindow -Segments $segments -ClipSeconds $ClipSeconds -MinStart $range.MinStart -MaxEnd $range.MaxEnd
+        if ($null -eq $window) { continue }
+        $lang = Get-LanguageForClip -FilePath $FilePath -OffsetSeconds $window.Start -ClipSeconds ($window.End - $window.Start) -ModelsPath $ModelsPath -DockerImage $DockerImage -Device $Device -ComputeType $ComputeType
+        if ($null -eq $lang) { continue }
+        [pscustomobject]@{ Start = $window.Start; Language = $lang }
     }
-    else { $null }
 
-    $lang2 = if ($null -ne $window2) {
-        Get-LanguageForClip -FilePath $FilePath -OffsetSeconds $window2.Start -ClipSeconds ($window2.End - $window2.Start) -ModelsPath $ModelsPath -DockerImage $DockerImage -Device $Device -ComputeType $ComputeType
-    }
-    else { $null }
+    $samples = @($samples)
+    if ($samples.Count -eq 0) { return $null }
+    if ($samples.Count -eq 1) { return $samples[0].Language }
 
-    if ($null -ne $lang1 -and $null -ne $lang2) {
-        if ($lang1 -eq $lang2) {
-            return $lang1
-        }
-        Write-Host "Language probe disagreement (window1@$($window1.Start)s=$lang1, window2@$($window2.Start)s=$lang2); deferring to normal auto-detection."
-        return $null
+    $groups = $samples | Group-Object -Property Language | Sort-Object Count -Descending
+    if ($groups[0].Count -ge 2) {
+        return $groups[0].Name
     }
-    if ($null -ne $lang1) { return $lang1 }
-    if ($null -ne $lang2) { return $lang2 }
+
+    $summary = ($samples | ForEach-Object { "$($_.Start)s=$($_.Language)" }) -join ", "
+    if ($samples.Language -contains "en") {
+        Write-Host "Language probe split with no majority ($summary); defaulting to English."
+        return "en"
+    }
+    Write-Host "Language probe split with no majority ($summary); deferring to normal auto-detection."
     return $null
 }
 
