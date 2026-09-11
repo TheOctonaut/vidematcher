@@ -545,17 +545,43 @@ $form.Controls.Add($outputText)
 # Shared process-running engine
 # ---------------------------------------------------------------------------
 #
-# Output is streamed live: OutputDataReceived/ErrorDataReceived fire on a
-# background thread, so lines are pushed into a thread-safe queue rather than
-# touching WinForms controls directly. A UI-thread timer drains the queue,
-# appends to the output box, and updates the shared progress bar/status label
-# by parsing the PROGRESS|.../SUMMARY|... protocol common to both tools.
+# Output is streamed live. NOTE: Register-ObjectEvent's -Action scriptblock is
+# dispatched through PowerShell's own engine event queue, which is only
+# processed when the engine is idle between statements. Because this script's
+# main thread never returns from $form.ShowDialog() while the form is open,
+# that queue is never drained and no output would ever appear (verified via a
+# minimal repro). Instead, two dedicated background [powershell] runspaces do
+# a plain blocking ReadLine() loop over the child's stdout/stderr streams and
+# push lines into a thread-safe queue - this runs on the .NET thread pool,
+# independent of the main engine thread's idle state. A UI-thread timer then
+# drains the queue, appends to the output box, and updates the shared
+# progress bar/status label by parsing the PROGRESS|.../SUMMARY|... protocol
+# common to both tools.
 
 $script:runState = [PSCustomObject]@{
     Process     = $null
+    OutReader   = $null
+    ErrReader   = $null
     Queue       = [System.Collections.Concurrent.ConcurrentQueue[string]]::new()
     LastTotal   = 0
     LastIndex   = 0
+}
+
+function Stop-StreamReader {
+    param($Reader)
+
+    if ($null -eq $Reader) { return }
+    try {
+        # By the time this is called the child process has exited (or been
+        # killed), so its stdout/stderr streams are already closed and the
+        # reader loop's ReadLine() will have hit EOF almost immediately -
+        # this EndInvoke should return promptly, not block indefinitely.
+        [void]$Reader.PowerShell.EndInvoke($Reader.Handle)
+    }
+    catch { }
+    finally {
+        $Reader.PowerShell.Dispose()
+    }
 }
 
 $outputTimer = New-Object System.Windows.Forms.Timer
@@ -628,6 +654,10 @@ $outputTimer.Add_Tick({
             }
 
             $outputTimer.Stop()
+            Stop-StreamReader -Reader $script:runState.OutReader
+            Stop-StreamReader -Reader $script:runState.ErrReader
+            $script:runState.OutReader = $null
+            $script:runState.ErrReader = $null
             $exitCode = $proc.ExitCode
             if ($statusLabel.Text -notmatch '^(Done|Aborted|Failed|Finished)') {
                 if ($exitCode -eq 0) {
@@ -691,25 +721,30 @@ function Start-ToolRun {
 
         $process = New-Object System.Diagnostics.Process
         $process.StartInfo = $psi
-        $process.EnableRaisingEvents = $true
 
         $queueRef = $script:runState.Queue
 
-        Register-ObjectEvent -InputObject $process -EventName OutputDataReceived -Action {
-            if ($null -ne $Event.SourceEventArgs.Data) {
-                $Event.MessageData.Enqueue($Event.SourceEventArgs.Data)
+        # Plain blocking ReadLine() loop, executed on a dedicated background
+        # runspace so it runs independent of the main thread being blocked
+        # inside ShowDialog(). See the comment above $script:runState.
+        $readerScript = {
+            param($reader, $queue)
+            $line = $reader.ReadLine()
+            while ($null -ne $line) {
+                $queue.Enqueue($line)
+                $line = $reader.ReadLine()
             }
-        } -MessageData $queueRef | Out-Null
-
-        Register-ObjectEvent -InputObject $process -EventName ErrorDataReceived -Action {
-            if ($null -ne $Event.SourceEventArgs.Data) {
-                $Event.MessageData.Enqueue($Event.SourceEventArgs.Data)
-            }
-        } -MessageData $queueRef | Out-Null
+        }
 
         [void]$process.Start()
-        $process.BeginOutputReadLine()
-        $process.BeginErrorReadLine()
+
+        $outPs = [powershell]::Create()
+        [void]$outPs.AddScript($readerScript).AddArgument($process.StandardOutput).AddArgument($queueRef)
+        $script:runState.OutReader = [PSCustomObject]@{ PowerShell = $outPs; Handle = $outPs.BeginInvoke() }
+
+        $errPs = [powershell]::Create()
+        [void]$errPs.AddScript($readerScript).AddArgument($process.StandardError).AddArgument($queueRef)
+        $script:runState.ErrReader = [PSCustomObject]@{ PowerShell = $errPs; Handle = $errPs.BeginInvoke() }
 
         $script:runState.Process = $process
         $outputTimer.Start()
