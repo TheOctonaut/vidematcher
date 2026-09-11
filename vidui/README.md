@@ -48,3 +48,15 @@ settings not exposed here (API keys, `ModelsPath`, `DockerImage`, etc.).
   URL/API key, LLM base URL/key/model, `ModelsPath`, `DockerImage`) — those
   are read from each tool's `options.json` as usual. Add more fields here if
   you find yourself needing to override them per-run often.
+
+## Troubleshooting
+
+- `vidui` writes a per-run debug log to `vidui/logs/vidui-<timestamp>-<pid>.log`
+  (falls back to the temp folder if that isn't writable). It records the
+  resolved script paths, the exact command line used to launch the selected
+  tool, every line of that tool's stdout/stderr, and the final exit code.
+- If a run fails immediately with no output, or the app itself shows an
+  unexpected "vidui - ..." error dialog, check the latest log file first —
+  it's the fastest way to see what actually happened.
+- Log files are gitignored (`*.log`) and are safe to delete; a new one is
+  created each time `vidui` starts.

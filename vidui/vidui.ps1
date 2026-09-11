@@ -29,6 +29,9 @@ if ($currentApartment -ne [System.Threading.ApartmentState]::STA) {
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
+# Must be set before any Controls are created on this thread.
+[System.Windows.Forms.Application]::SetUnhandledExceptionMode([System.Windows.Forms.UnhandledExceptionMode]::CatchException)
+
 $ErrorActionPreference = "Stop"
 
 # ---------------------------------------------------------------------------
@@ -74,9 +77,101 @@ function Get-PowerShellExe {
 }
 
 function Escape-Argument {
+    # Quotes a value for use inside a single ProcessStartInfo.Arguments string,
+    # following the Win32/CRT command-line quoting rules: a run of backslashes
+    # must be doubled when it is immediately followed by a quote (embedded or
+    # closing), otherwise a trailing "\" merges with the closing quote and the
+    # argument never terminates (e.g. a bare "-Path", 'Z:\' would swallow every
+    # argument after it). A naive '"' + value + '"' + doubled-quotes approach
+    # does not handle this and silently corrupts any path ending in "\".
     param([Parameter(Mandatory = $true)][string]$Value)
-    return '"' + $Value.Replace('"', '""') + '"'
+
+    $sb = New-Object System.Text.StringBuilder
+    [void]$sb.Append('"')
+    $backslashCount = 0
+    foreach ($ch in $Value.ToCharArray()) {
+        if ($ch -eq '\') {
+            $backslashCount++
+            continue
+        }
+        if ($ch -eq '"') {
+            [void]$sb.Append('\', ($backslashCount * 2 + 1))
+            [void]$sb.Append('"')
+            $backslashCount = 0
+            continue
+        }
+        if ($backslashCount -gt 0) {
+            [void]$sb.Append('\', $backslashCount)
+            $backslashCount = 0
+        }
+        [void]$sb.Append($ch)
+    }
+    if ($backslashCount -gt 0) {
+        [void]$sb.Append('\', $backslashCount * 2)
+    }
+    [void]$sb.Append('"')
+    return $sb.ToString()
 }
+
+# ---------------------------------------------------------------------------
+# Debug logging (non-fatal: a logging failure must never break the UI)
+# ---------------------------------------------------------------------------
+
+$script:VidUiLogPath = $null
+$script:VidUiLogFallbackActivated = $false
+
+function Initialize-VidUiLogPath {
+    $logDir = Join-Path $scriptRoot "logs"
+    try {
+        New-Item -ItemType Directory -Force -Path $logDir -ErrorAction Stop | Out-Null
+        $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
+        return Join-Path $logDir ("vidui-{0}-{1}.log" -f $stamp, $PID)
+    }
+    catch {
+        # Fall back to the temp folder if the repo folder isn't writable.
+        return Join-Path ([System.IO.Path]::GetTempPath()) ("vidui-{0}-{1}.log" -f (Get-Date -Format "yyyyMMdd-HHmmss"), $PID)
+    }
+}
+
+function Write-VidUiLog {
+    param([Parameter(Mandatory = $true)][string]$Message)
+
+    if ([string]::IsNullOrWhiteSpace($script:VidUiLogPath)) { return }
+    $ts = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    $line = "[{0}] {1}" -f $ts, $Message
+
+    try {
+        Add-Content -LiteralPath $script:VidUiLogPath -Value $line -ErrorAction Stop
+    }
+    catch {
+        if (-not $script:VidUiLogFallbackActivated) {
+            $script:VidUiLogFallbackActivated = $true
+            $fallbackPath = Join-Path ([System.IO.Path]::GetTempPath()) ("vidui-fallback-{0}-{1}.log" -f (Get-Date -Format "yyyyMMdd-HHmmss"), $PID)
+            $script:VidUiLogPath = $fallbackPath
+            try { Add-Content -LiteralPath $script:VidUiLogPath -Value $line -ErrorAction Stop } catch { }
+        }
+        # If even the fallback fails, logging is simply skipped; it must never interrupt the UI.
+    }
+}
+
+function Show-VidUiError {
+    param(
+        [Parameter(Mandatory = $true)][string]$Message,
+        [Parameter(Mandatory = $false)][string]$Title = "Error"
+    )
+
+    Write-VidUiLog ("[ERROR] {0}" -f $Message)
+    $logHint = if ($script:VidUiLogPath) { "`n`nDetails logged to:`n$script:VidUiLogPath" } else { "" }
+    [System.Windows.Forms.MessageBox]::Show(
+        ($Message + $logHint),
+        $Title,
+        [System.Windows.Forms.MessageBoxButtons]::OK,
+        [System.Windows.Forms.MessageBoxIcon]::Error
+    ) | Out-Null
+}
+
+$script:VidUiLogPath = Initialize-VidUiLogPath
+Write-VidUiLog ("vidui started. VidtagScript=$VidtagScript VidtranscribeScript=$VidtranscribeScript")
 
 function Load-OptionsDefaults {
     param([Parameter(Mandatory = $true)][string]$OptionsPath)
@@ -513,36 +608,49 @@ function Update-ProgressFromLine {
 }
 
 $outputTimer.Add_Tick({
-    $line = $null
-    $drained = 0
-    while ($script:runState.Queue.TryDequeue([ref]$line) -and $drained -lt 200) {
-        Add-OutputLine -Line $line
-        Update-ProgressFromLine -Line $line
-        $drained++
-    }
-
-    $proc = $script:runState.Process
-    if ($null -ne $proc -and $proc.HasExited) {
-        # Drain anything left before finishing up.
-        while ($script:runState.Queue.TryDequeue([ref]$line)) {
+    try {
+        $line = $null
+        $drained = 0
+        while ($script:runState.Queue.TryDequeue([ref]$line) -and $drained -lt 200) {
             Add-OutputLine -Line $line
             Update-ProgressFromLine -Line $line
+            Write-VidUiLog ("CHILD: {0}" -f $line)
+            $drained++
         }
 
-        $outputTimer.Stop()
-        $exitCode = $proc.ExitCode
-        if ($statusLabel.Text -notmatch '^(Done|Aborted|Failed|Finished)') {
-            if ($exitCode -eq 0) {
-                $statusLabel.Text = "Done (ExitCode 0)"
+        $proc = $script:runState.Process
+        if ($null -ne $proc -and $proc.HasExited) {
+            # Drain anything left before finishing up.
+            while ($script:runState.Queue.TryDequeue([ref]$line)) {
+                Add-OutputLine -Line $line
+                Update-ProgressFromLine -Line $line
+                Write-VidUiLog ("CHILD: {0}" -f $line)
             }
-            else {
-                $statusLabel.Text = "Failed (ExitCode $exitCode)"
+
+            $outputTimer.Stop()
+            $exitCode = $proc.ExitCode
+            if ($statusLabel.Text -notmatch '^(Done|Aborted|Failed|Finished)') {
+                if ($exitCode -eq 0) {
+                    $statusLabel.Text = "Done (ExitCode 0)"
+                }
+                else {
+                    $statusLabel.Text = "Failed (ExitCode $exitCode)"
+                }
             }
+            Write-VidUiLog ("Process exited. ExitCode={0} FinalStatus={1}" -f $exitCode, $statusLabel.Text)
+            $script:runState.Process = $null
+            $runButton.Enabled = $true
+            $cancelButton.Enabled = $false
+            $tabControl.Enabled = $true
         }
+    }
+    catch {
+        $outputTimer.Stop()
         $script:runState.Process = $null
         $runButton.Enabled = $true
         $cancelButton.Enabled = $false
         $tabControl.Enabled = $true
+        Show-VidUiError -Message ("An unexpected error occurred while monitoring the running tool:`n`n{0}" -f $_.Exception.Message) -Title "vidui - Run monitor error"
     }
 })
 
@@ -552,68 +660,81 @@ function Start-ToolRun {
         [Parameter(Mandatory = $true)][string[]]$Arguments
     )
 
-    if (-not (Test-Path -LiteralPath $ScriptPath -PathType Leaf)) {
-        [System.Windows.Forms.MessageBox]::Show("Cannot find script: $ScriptPath", "Error", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error) | Out-Null
-        return
+    try {
+        if (-not (Test-Path -LiteralPath $ScriptPath -PathType Leaf)) {
+            Show-VidUiError -Message "Cannot find script: $ScriptPath" -Title "vidui - Script not found"
+            return
+        }
+
+        $exe = Get-PowerShellExe
+        $scriptPathResolved = (Resolve-Path -LiteralPath $ScriptPath).Path
+
+        $fullArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", (Escape-Argument -Value $scriptPathResolved)) + $Arguments
+        $commandLine = $fullArgs -join " "
+        Write-VidUiLog ("Starting: {0} {1}" -f $exe, $commandLine)
+
+        $outputText.Clear()
+        $progressBar.Value = 0
+        $progressBar.Maximum = 1
+        $statusLabel.Text = "Running..."
+        $runButton.Enabled = $false
+        $cancelButton.Enabled = $true
+        $tabControl.Enabled = $false
+
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName               = $exe
+        $psi.Arguments              = $commandLine
+        $psi.UseShellExecute        = $false
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError  = $true
+        $psi.CreateNoWindow         = $true
+
+        $process = New-Object System.Diagnostics.Process
+        $process.StartInfo = $psi
+        $process.EnableRaisingEvents = $true
+
+        $queueRef = $script:runState.Queue
+
+        Register-ObjectEvent -InputObject $process -EventName OutputDataReceived -Action {
+            if ($null -ne $Event.SourceEventArgs.Data) {
+                $Event.MessageData.Enqueue($Event.SourceEventArgs.Data)
+            }
+        } -MessageData $queueRef | Out-Null
+
+        Register-ObjectEvent -InputObject $process -EventName ErrorDataReceived -Action {
+            if ($null -ne $Event.SourceEventArgs.Data) {
+                $Event.MessageData.Enqueue($Event.SourceEventArgs.Data)
+            }
+        } -MessageData $queueRef | Out-Null
+
+        [void]$process.Start()
+        $process.BeginOutputReadLine()
+        $process.BeginErrorReadLine()
+
+        $script:runState.Process = $process
+        $outputTimer.Start()
     }
-
-    $exe = Get-PowerShellExe
-    $scriptPathResolved = (Resolve-Path -LiteralPath $ScriptPath).Path
-
-    $fullArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", (Escape-Argument -Value $scriptPathResolved)) + $Arguments
-
-    $outputText.Clear()
-    $progressBar.Value = 0
-    $progressBar.Maximum = 1
-    $statusLabel.Text = "Running..."
-    $runButton.Enabled = $false
-    $cancelButton.Enabled = $true
-    $tabControl.Enabled = $false
-
-    $psi = New-Object System.Diagnostics.ProcessStartInfo
-    $psi.FileName               = $exe
-    $psi.Arguments              = ($fullArgs -join " ")
-    $psi.UseShellExecute        = $false
-    $psi.RedirectStandardOutput = $true
-    $psi.RedirectStandardError  = $true
-    $psi.CreateNoWindow         = $true
-
-    $process = New-Object System.Diagnostics.Process
-    $process.StartInfo = $psi
-    $process.EnableRaisingEvents = $true
-
-    $queueRef = $script:runState.Queue
-
-    Register-ObjectEvent -InputObject $process -EventName OutputDataReceived -Action {
-        if ($null -ne $Event.SourceEventArgs.Data) {
-            $Event.MessageData.Enqueue($Event.SourceEventArgs.Data)
-        }
-    } -MessageData $queueRef | Out-Null
-
-    Register-ObjectEvent -InputObject $process -EventName ErrorDataReceived -Action {
-        if ($null -ne $Event.SourceEventArgs.Data) {
-            $Event.MessageData.Enqueue($Event.SourceEventArgs.Data)
-        }
-    } -MessageData $queueRef | Out-Null
-
-    [void]$process.Start()
-    $process.BeginOutputReadLine()
-    $process.BeginErrorReadLine()
-
-    $script:runState.Process = $process
-    $outputTimer.Start()
+    catch {
+        $runButton.Enabled = $true
+        $cancelButton.Enabled = $false
+        $tabControl.Enabled = $true
+        Show-VidUiError -Message ("Failed to start the tool process:`n`n{0}" -f $_.Exception.Message) -Title "vidui - Failed to start"
+    }
 }
 
 $cancelButton.Add_Click({
-    $proc = $script:runState.Process
-    if ($null -ne $proc -and -not $proc.HasExited) {
-        try {
+    try {
+        $proc = $script:runState.Process
+        if ($null -ne $proc -and -not $proc.HasExited) {
             # Use taskkill for a reliable process-tree kill across both
             # Windows PowerShell 5.1 and PowerShell 7+ hosts.
             Start-Process -FilePath "taskkill.exe" -ArgumentList @("/PID", $proc.Id, "/T", "/F") -WindowStyle Hidden -Wait | Out-Null
+            $statusLabel.Text = "Cancelled"
+            Write-VidUiLog "Run cancelled by user."
         }
-        catch { }
-        $statusLabel.Text = "Cancelled"
+    }
+    catch {
+        Write-VidUiLog ("[WARN] Cancel failed: {0}" -f $_.Exception.Message)
     }
 })
 
@@ -622,6 +743,7 @@ $cancelButton.Add_Click({
 # ---------------------------------------------------------------------------
 
 $runButton.Add_Click({
+  try {
     if ($tabControl.SelectedTab -eq $tabTranscribe) {
         $path = $tPathText.Text.Trim()
         if ([string]::IsNullOrWhiteSpace($path)) {
@@ -672,6 +794,10 @@ $runButton.Add_Click({
 
         Start-ToolRun -ScriptPath $VidtagScript -Arguments $arguments
     }
+  }
+  catch {
+    Show-VidUiError -Message ("An unexpected error occurred while starting the run:`n`n{0}" -f $_.Exception.Message) -Title "vidui - Run button error"
+  }
 })
 
 $form.Add_FormClosing({
@@ -679,6 +805,36 @@ $form.Add_FormClosing({
     if ($null -ne $proc -and -not $proc.HasExited) {
         try { Start-Process -FilePath "taskkill.exe" -ArgumentList @("/PID", $proc.Id, "/T", "/F") -WindowStyle Hidden -Wait | Out-Null } catch { }
     }
+    Write-VidUiLog "vidui closing."
+})
+
+# ---------------------------------------------------------------------------
+# Global unhandled-exception safety net.
+#
+# Without this, an exception thrown inside a WinForms event handler that
+# isn't otherwise caught can silently terminate the whole app (the window
+# just disappears) with no visible error and nothing logged. These handlers
+# make sure that, whatever else happens, we log the failure and try to show
+# the user something before giving up.
+# ---------------------------------------------------------------------------
+
+[System.Windows.Forms.Application]::add_ThreadException({
+    param($sender, $e)
+    Write-VidUiLog ("[FATAL] Unhandled UI thread exception: {0}" -f $e.Exception)
+    try {
+        [System.Windows.Forms.MessageBox]::Show(
+            ("An unexpected error occurred:`n`n{0}`n`nDetails logged to:`n{1}" -f $e.Exception.Message, $script:VidUiLogPath),
+            "vidui - Unexpected error",
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Error
+        ) | Out-Null
+    }
+    catch { }
+})
+
+[System.AppDomain]::CurrentDomain.add_UnhandledException({
+    param($sender, $e)
+    Write-VidUiLog ("[FATAL] Unhandled non-UI exception (process will terminate): {0}" -f $e.ExceptionObject)
 })
 
 [void]$form.ShowDialog()

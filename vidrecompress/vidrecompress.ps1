@@ -59,8 +59,39 @@ $exampleOptionsFileName = "options.json.example"
 $exampleOptionsFile = Join-Path $scriptRoot $exampleOptionsFileName
 
 function Escape-Argument {
+    # Quotes a value for use inside a ProcessStartInfo.Arguments string,
+    # following Win32/CRT command-line quoting rules: runs of backslashes
+    # must be doubled immediately before a quote (embedded or closing),
+    # otherwise a trailing "\" merges with the closing quote and the
+    # argument never terminates (e.g. a path like "Z:\" would swallow every
+    # argument after it).
     param([Parameter(Mandatory = $true)][string]$Value)
-    return '"' + $Value.Replace('"', '""') + '"'
+
+    $sb = New-Object System.Text.StringBuilder
+    [void]$sb.Append('"')
+    $backslashCount = 0
+    foreach ($ch in $Value.ToCharArray()) {
+        if ($ch -eq '\') {
+            $backslashCount++
+            continue
+        }
+        if ($ch -eq '"') {
+            [void]$sb.Append('\', ($backslashCount * 2 + 1))
+            [void]$sb.Append('"')
+            $backslashCount = 0
+            continue
+        }
+        if ($backslashCount -gt 0) {
+            [void]$sb.Append('\', $backslashCount)
+            $backslashCount = 0
+        }
+        [void]$sb.Append($ch)
+    }
+    if ($backslashCount -gt 0) {
+        [void]$sb.Append('\', $backslashCount * 2)
+    }
+    [void]$sb.Append('"')
+    return $sb.ToString()
 }
 
 function Get-OptionValue {
