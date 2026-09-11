@@ -144,6 +144,22 @@ To force a full re-probe regardless of any existing stamp (e.g. after a probing 
 .\vidtranscribe.ps1 -Path "Z:\Movies" -RecheckLanguage -ForceRecheck
 ```
 
+### Quick non-Latin scan for known-English studios
+
+The full `-RecheckLanguage` probe costs a couple of minutes of GPU time per file (three clip extractions plus a VAD pass), which is impractical across a library with hundreds of already-transcribed files. If you already know - from studio naming conventions, not from the transcript - that certain files are English, you don't need to re-probe the language at all. What's still worth checking cheaply is whether Whisper hallucinated garbage in the *wrong script* (e.g. the Cyrillic `"Субтитры создавал DimaTorzok"` artifact), since that can happen regardless of the true spoken language.
+
+`-QuickScanNonLatin` does this: for files whose studio (the text before the first `.` or `-` in the filename) is in `-StudioAllowlist`, it skips the VAD probe entirely and instead regex-scans the existing `.srt` file(s) for non-Latin script characters (Cyrillic, Greek, Arabic, Hebrew, CJK, Hangul, Devanagari, Thai, Georgian, Armenian, etc.). Files with no non-Latin characters are stamped clean (same `vidtranscribe_probe_version` field as `-RecheckLanguage`, plus `vidtranscribe_verified_via: "quick_latin_scan"` so you can tell later how a file was verified); files with a match are treated like a mismatch when `-FixMismatches` is passed - the `.srt`(s) and sidecar are deleted so a normal run reprocesses them.
+
+```powershell
+# Preview which allowlisted-studio files would be scanned
+.\vidtranscribe.ps1 -Path "Z:\Movies" -QuickScanNonLatin -StudioAllowlist "Vixen","PureTaboo" -DryRun
+
+# Scan for real, deleting+requeueing any file with a non-Latin match
+.\vidtranscribe.ps1 -Path "Z:\Movies" -QuickScanNonLatin -StudioAllowlist "Vixen","PureTaboo" -FixMismatches -NoConfirm
+```
+
+**Caveat**: this is a deliberately blunt instrument. It only catches hallucinations that land in a non-Latin script - it cannot detect a hallucination that produces plausible-looking garbage in another Latin-script language (e.g. fake French or Spanish). Only add a studio to `-StudioAllowlist` if you're confident, from real-world knowledge of that studio's catalogue, that its dialogue is reliably English (or another single known language); this feature does not verify the language itself, only the absence of an obviously wrong script. It also respects the same `-ForceRecheck`/`-MaxFiles`/`-DryRun`/`-NoConfirm` conventions as `-RecheckLanguage`, and reports `not_allowlisted=`/`already_verified=`/`checked=`/`clean=`/`flagged=` counts in its final `SUMMARY|...` line.
+
 ## Pre-caching alignment models
 
 WhisperX downloads a per-language alignment model the first time it needs that language, and only then - not up front. For most languages this is a small (~360MB) download, but for some (e.g. Portuguese, Russian) it's a large (~1.2GB) Hugging Face download that can stall mid-transcription on a flaky connection, which looks like the whole run has hung.

@@ -39,6 +39,12 @@ param(
     [switch]$ForceRecheck,
 
     [Parameter(Mandatory = $false)]
+    [switch]$QuickScanNonLatin,
+
+    [Parameter(Mandatory = $false)]
+    [string[]]$StudioAllowlist,
+
+    [Parameter(Mandatory = $false)]
     [switch]$DryRun,
 
     [Parameter(Mandatory = $false)]
@@ -481,6 +487,167 @@ function Get-ProbedLanguage {
     return $null
 }
 
+function Invoke-NonLatinQuickScan {
+    # A cheap alternative to the full VAD-based probe, for studios/sources
+    # already known (by the operator, not detected automatically) to only
+    # ever produce English dialogue. Instead of re-transcribing a sample
+    # clip, this just scans the already-produced .srt text for characters
+    # from non-Latin scripts (Cyrillic, CJK, Hangul, Arabic, etc.) - the
+    # telltale sign of a WhisperX hallucination/wrong-script mistranscription
+    # (see "Detected language accuracy" in the README). It cannot catch a
+    # hallucination that happens to land in another Latin-script language,
+    # so it's only appropriate for an operator-curated allowlist of sources
+    # that are known to be English-only.
+    param(
+        [Parameter(Mandatory = $true)][object[]]$VideoFiles,
+        [Parameter(Mandatory = $true)][string[]]$StudioAllowlist,
+        [Parameter(Mandatory = $true)][int]$MaxFiles,
+        [Parameter(Mandatory = $true)][int]$LanguageProbeVersion,
+        [Parameter(Mandatory = $true)][bool]$Fix,
+        [Parameter(Mandatory = $true)][bool]$IsDryRun,
+        [Parameter(Mandatory = $true)][bool]$IsNoConfirm,
+        [switch]$Force
+    )
+
+    if (-not $StudioAllowlist -or $StudioAllowlist.Count -eq 0) {
+        Write-Host "No -StudioAllowlist provided; nothing to scan."
+        Write-Host "SUMMARY|tool=vidtranscribe|status=noop|dry_run=$($IsDryRun.ToString().ToLowerInvariant())|total=0|not_allowlisted=0|already_verified=0|checked=0|clean=0|flagged=0"
+        return 0
+    }
+
+    $allowSet = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($s in $StudioAllowlist) { [void]$allowSet.Add($s.Trim()) }
+
+    $nonLatinPattern = [regex]'[\u0370-\u03FF\u0400-\u04FF\u0500-\u052F\u0530-\u058F\u0590-\u05FF\u0600-\u06FF\u0700-\u074F\u0780-\u07BF\u0900-\u097F\u0E00-\u0E7F\u10A0-\u10FF\u1100-\u11FF\u3040-\u30FF\u3100-\u312F\u3400-\u4DBF\u4E00-\u9FFF\uAC00-\uD7AF\uF900-\uFAFF]'
+
+    $candidates = New-Object System.Collections.Generic.List[object]
+    $alreadyVerified = 0
+    $notAllowlisted = 0
+    foreach ($file in $VideoFiles) {
+        $baseName = [System.IO.Path]::GetFileNameWithoutExtension($file.Name)
+        $jsonPath = Join-Path $file.DirectoryName "$baseName.vidtranscribe.json"
+        if (-not (Test-Path -LiteralPath $jsonPath -PathType Leaf)) { continue }
+
+        $idx = $baseName.IndexOfAny(@('.', '-'))
+        $particle = if ($idx -lt 0) { $baseName } else { $baseName.Substring(0, $idx) }
+        if (-not $allowSet.Contains($particle.Trim())) {
+            $notAllowlisted++
+            continue
+        }
+
+        if (-not $Force) {
+            $stampedVersion = $null
+            try {
+                $existingJson = Get-Content -LiteralPath $jsonPath -Raw | ConvertFrom-Json
+                if ($null -ne $existingJson.vidtranscribe_probe_version) { $stampedVersion = [int]$existingJson.vidtranscribe_probe_version }
+            }
+            catch { }
+            if ($null -ne $stampedVersion -and $stampedVersion -ge $LanguageProbeVersion) {
+                $alreadyVerified++
+                continue
+            }
+        }
+
+        $candidates.Add([PSCustomObject]@{ File = $file; BaseName = $baseName; JsonPath = $jsonPath })
+    }
+
+    if ($MaxFiles -gt 0 -and $candidates.Count -gt $MaxFiles) {
+        $candidates = $candidates.GetRange(0, $MaxFiles)
+    }
+
+    Write-Host ""
+    Write-Host "Quick non-Latin scan: $notAllowlisted file(s) not in the studio allowlist - skipped."
+    if ($alreadyVerified -gt 0) {
+        Write-Host "Quick non-Latin scan: $alreadyVerified file(s) already verified under the current probe logic (v$LanguageProbeVersion) - skipped. Use -ForceRecheck to re-scan them anyway."
+    }
+    Write-Host "Quick non-Latin scan: $($candidates.Count) allowlisted file(s) to scan."
+
+    if ($candidates.Count -eq 0) {
+        Write-Host "SUMMARY|tool=vidtranscribe|status=noop|dry_run=$($IsDryRun.ToString().ToLowerInvariant())|total=$($VideoFiles.Count)|not_allowlisted=$notAllowlisted|already_verified=$alreadyVerified|checked=0|clean=0|flagged=0"
+        return 0
+    }
+
+    if ($IsDryRun) {
+        Write-Host "Dry run - the following file(s) would be scanned:"
+        foreach ($c in $candidates) { Write-Host "  $($c.File.FullName)" }
+        Write-Host "SUMMARY|tool=vidtranscribe|status=noop|dry_run=true|total=$($VideoFiles.Count)|not_allowlisted=$notAllowlisted|already_verified=$alreadyVerified|checked=0|clean=0|flagged=0"
+        return 0
+    }
+
+    if (-not $IsNoConfirm) {
+        Write-Host ""
+        $verb = if ($Fix) { "scan and fix flagged file(s) for" } else { "scan" }
+        $confirm = Read-Host "$($verb.Substring(0,1).ToUpperInvariant())$($verb.Substring(1)) $($candidates.Count) file(s)? (Y/N)"
+        if ($confirm -notmatch '^[Yy]') {
+            Write-Host "Aborted."
+            Write-Host "SUMMARY|tool=vidtranscribe|status=aborted|dry_run=false|total=$($VideoFiles.Count)|not_allowlisted=$notAllowlisted|already_verified=$alreadyVerified|checked=0|clean=0|flagged=0"
+            return 0
+        }
+    }
+
+    $clean = 0
+    $flagged = 0
+    $index = 0
+
+    foreach ($c in $candidates) {
+        $index++
+        $safeName = ConvertTo-ProgressValue $c.File.Name
+        Write-Host "PROGRESS|tool=vidtranscribe|event=start|index=$index|total=$($candidates.Count)|file=$safeName"
+
+        $srtFiles = @(Get-ChildItem -LiteralPath $c.File.DirectoryName -File -Filter "$($c.BaseName).*.srt" -ErrorAction SilentlyContinue)
+        if ($srtFiles.Count -eq 0) {
+            Write-Host "  No subtitle file(s) found to scan: $($c.File.FullName)"
+            Write-Host "PROGRESS|tool=vidtranscribe|event=complete|index=$index|total=$($candidates.Count)|file=$safeName|failed=true"
+            continue
+        }
+
+        $hits = @()
+        foreach ($srt in $srtFiles) {
+            $text = Get-Content -LiteralPath $srt.FullName -Raw -ErrorAction SilentlyContinue
+            if ($null -ne $text -and $nonLatinPattern.IsMatch($text)) {
+                $hits += $srt.Name
+            }
+        }
+
+        if ($hits.Count -gt 0) {
+            $flagged++
+            Write-Host "  FLAGGED (non-Latin text found in $($hits -join ', ')): $($c.File.FullName)"
+
+            if ($Fix) {
+                $pathsToRemove = New-Object System.Collections.Generic.List[string]
+                foreach ($srt in $srtFiles) { $pathsToRemove.Add($srt.FullName) }
+                $pathsToRemove.Add($c.JsonPath)
+
+                foreach ($p in $pathsToRemove) {
+                    Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue
+                    Write-Host "    Removed: $p"
+                }
+                Write-Host "    File will be re-transcribed on the next normal vidtranscribe run."
+            }
+        }
+        else {
+            $clean++
+            Write-Host "  Clean: $($c.File.FullName)"
+            try {
+                $existingJson = Get-Content -LiteralPath $c.JsonPath -Raw | ConvertFrom-Json
+                $existingJson | Add-Member -NotePropertyName 'vidtranscribe_probe_version' -NotePropertyValue $LanguageProbeVersion -Force
+                $existingJson | Add-Member -NotePropertyName 'vidtranscribe_verified_via' -NotePropertyValue 'quick_latin_scan' -Force
+                ($existingJson | ConvertTo-Json -Depth 20) | Set-Content -LiteralPath $c.JsonPath -NoNewline
+            }
+            catch {
+                Write-Host "    Warning: could not stamp probe version on $($c.JsonPath): $($_.Exception.Message)"
+            }
+        }
+
+        Write-Host "PROGRESS|tool=vidtranscribe|event=complete|index=$index|total=$($candidates.Count)|file=$safeName"
+    }
+
+    Write-Host ""
+    Write-Host "Done."
+    Write-Host "SUMMARY|tool=vidtranscribe|status=ok|dry_run=false|total=$($VideoFiles.Count)|not_allowlisted=$notAllowlisted|already_verified=$alreadyVerified|checked=$($candidates.Count)|clean=$clean|flagged=$flagged"
+    return 0
+}
+
 function Invoke-LanguageRecheck {
     param(
         [Parameter(Mandatory = $true)][object[]]$VideoFiles,
@@ -635,6 +802,11 @@ function Invoke-LanguageRecheck {
 
     if ($status -eq "failed") { return 1 }
     return 0
+}
+
+if ($QuickScanNonLatin) {
+    $exitCode = Invoke-NonLatinQuickScan -VideoFiles $videoFiles -StudioAllowlist $StudioAllowlist -MaxFiles $resolvedMaxFiles -LanguageProbeVersion $LanguageProbeVersion -Fix:$FixMismatches.IsPresent -IsDryRun:$DryRun.IsPresent -IsNoConfirm:$NoConfirm.IsPresent -Force:$ForceRecheck.IsPresent
+    exit $exitCode
 }
 
 if ($RecheckLanguage) {
