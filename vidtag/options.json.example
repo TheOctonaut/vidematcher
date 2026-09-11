@@ -1,0 +1,20 @@
+{
+  "ScanPath": "C:/path/to/media",
+  "JellyfinUrl": "http://localhost:8096",
+  "JellyfinApiKey": "",
+  "LlmBaseUrl": "https://api.openai.com/v1",
+  "LlmApiKey": "",
+  "LlmModel": "gpt-4o",
+  "AllowNewTags": false,
+  "MaxFiles": 0,
+  "GenerateDescription": false,
+  "UseVisuals": false,
+  "FfmpegPath": "ffmpeg",
+  "LogFile": "vidtag-llm.jsonl",
+  "VocabCacheFile": "vidtag-vocab-cache.json",
+  "VocabCacheMaxAgeHours": 24,
+  "LlmRequestDelaySeconds": 2,
+  "LlmMaxRetries": 2,
+  "LlmRetryDelaySeconds": 5,
+  "RefreshJellyfinLibrary": false
+}

@@ -80,8 +80,26 @@ Use this to generate Jellyfin-compatible subtitles for a video library, plus a r
 - Standalone tool; not yet part of the `viddispatch` pipeline
 - Dry run mode; skips files with existing subtitles
 - Outputs `Movie.<lang>.srt` (Jellyfin external subtitle) and `Movie.vidtranscribe.json` (rich metadata) next to the source file
+- Use the combined [vidui](vidui/) WinForms UI to run this and `vidtag` interactively
 
 → See [vidtranscribe/README.md](vidtranscribe/README.md)
+
+---
+
+### [vidtag](vidtag/)
+
+LLM-powered metadata enrichment for Jellyfin `.nfo` files. Reads transcripts
+produced by `vidtranscribe` and uses a language model to suggest genres, tags,
+and (optionally) a plot description and visual context.
+
+- Standalone tool; never part of the `viddispatch` pipeline (too slow/costly)
+- Caches Jellyfin's tag/genre vocabulary locally; normalizes spelling/casing
+  variants against it
+- Optional plot generation (`-GenerateDescription`) and screenshot-based
+  visual context (`-UseVisuals`)
+- Use the combined [vidui](vidui/) WinForms UI to run this and `vidtranscribe` interactively
+
+→ See [vidtag/README.md](vidtag/README.md)
 
 ---
 
@@ -107,6 +125,22 @@ Dockerized browser UI MVP for queuing and monitoring `viddispatch` runs on a sin
 - Shows run output and final `SUMMARY|...` line
 
 → See [webui/README.md](webui/README.md)
+
+---
+
+### [vidui](vidui/)
+
+A single WinForms UI for the standalone tools: one Run button, progress bar,
+status line, and output log shared across a "Transcribe" tab (`vidtranscribe`)
+and a "Tag" tab (`vidtag`) — both speak the same `PROGRESS|...`/`SUMMARY|...`
+output protocol, so one engine can drive either.
+
+- Reads each tool's own `options.json` for field defaults; doesn't write
+  options itself
+- Live progress/output streaming with a Cancel button (kills the child
+  process tree)
+
+→ See [vidui/README.md](vidui/README.md)
 
 ---
 

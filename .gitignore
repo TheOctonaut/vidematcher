@@ -2,6 +2,8 @@
 *.lnk
 options.json
 *.log
+*.jsonl
+vidtag/vidtag-vocab-cache.json
 vidwebmatch/native-host/bin/
 vidwebmatch/native-host/obj/
 webui/.env
