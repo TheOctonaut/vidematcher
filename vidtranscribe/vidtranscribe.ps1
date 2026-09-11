@@ -36,6 +36,9 @@ param(
     [switch]$FixMismatches,
 
     [Parameter(Mandatory = $false)]
+    [switch]$ForceRecheck,
+
+    [Parameter(Mandatory = $false)]
     [switch]$DryRun,
 
     [Parameter(Mandatory = $false)]
@@ -43,6 +46,13 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+
+# Bumped whenever the language-probing logic changes materially (e.g. the
+# move from percentage sampling to VAD-based windows, or 2-window to
+# 3-window majority vote). Stamped into each sidecar's "language" resolution
+# so -RecheckLanguage can tell which files were already verified/produced
+# under the current logic and skip re-probing them.
+$LanguageProbeVersion = 2
 
 $scriptRoot = $PSScriptRoot
 if ([string]::IsNullOrWhiteSpace($scriptRoot)) {
@@ -479,22 +489,41 @@ function Invoke-LanguageRecheck {
         [Parameter(Mandatory = $true)][string]$DockerImage,
         [Parameter(Mandatory = $true)][string]$Device,
         [Parameter(Mandatory = $true)][string]$ComputeType,
+        [Parameter(Mandatory = $true)][int]$LanguageProbeVersion,
         [Parameter(Mandatory = $true)][bool]$Fix,
         [Parameter(Mandatory = $true)][bool]$IsDryRun,
-        [Parameter(Mandatory = $true)][bool]$IsNoConfirm
+        [Parameter(Mandatory = $true)][bool]$IsNoConfirm,
+        [switch]$Force
     )
 
     # Only files this tool itself transcribed have a .vidtranscribe.json
     # sidecar recording the language it originally claimed - that recorded
     # language is what we compare a fresh probe against. Subtitles obtained
-    # from elsewhere (no sidecar) aren't in scope for this audit.
+    # from elsewhere (no sidecar) aren't in scope for this audit. Files
+    # already stamped with the current probe-logic version were produced (or
+    # already verified) under today's logic, so they're skipped unless
+    # -Force is passed.
     $candidates = New-Object System.Collections.Generic.List[object]
+    $alreadyVerified = 0
     foreach ($file in $VideoFiles) {
         $baseName = [System.IO.Path]::GetFileNameWithoutExtension($file.Name)
         $jsonPath = Join-Path $file.DirectoryName "$baseName.vidtranscribe.json"
-        if (Test-Path -LiteralPath $jsonPath -PathType Leaf) {
-            $candidates.Add([PSCustomObject]@{ File = $file; BaseName = $baseName; JsonPath = $jsonPath })
+        if (-not (Test-Path -LiteralPath $jsonPath -PathType Leaf)) { continue }
+
+        if (-not $Force) {
+            $stampedVersion = $null
+            try {
+                $existingJson = Get-Content -LiteralPath $jsonPath -Raw | ConvertFrom-Json
+                if ($null -ne $existingJson.vidtranscribe_probe_version) { $stampedVersion = [int]$existingJson.vidtranscribe_probe_version }
+            }
+            catch { }
+            if ($null -ne $stampedVersion -and $stampedVersion -ge $LanguageProbeVersion) {
+                $alreadyVerified++
+                continue
+            }
         }
+
+        $candidates.Add([PSCustomObject]@{ File = $file; BaseName = $baseName; JsonPath = $jsonPath })
     }
 
     if ($MaxFiles -gt 0 -and $candidates.Count -gt $MaxFiles) {
@@ -502,17 +531,20 @@ function Invoke-LanguageRecheck {
     }
 
     Write-Host ""
+    if ($alreadyVerified -gt 0) {
+        Write-Host "Language recheck: $alreadyVerified file(s) already verified under the current probe logic (v$LanguageProbeVersion) - skipped. Use -ForceRecheck to re-probe them anyway."
+    }
     Write-Host "Language recheck: $($candidates.Count) previously-transcribed file(s) to probe."
 
     if ($candidates.Count -eq 0) {
-        Write-Host "SUMMARY|tool=vidtranscribe|status=noop|dry_run=$($IsDryRun.ToString().ToLowerInvariant())|total=$($VideoFiles.Count)|checked=0|matched=0|mismatched=0|probe_failed=0"
+        Write-Host "SUMMARY|tool=vidtranscribe|status=noop|dry_run=$($IsDryRun.ToString().ToLowerInvariant())|total=$($VideoFiles.Count)|already_verified=$alreadyVerified|checked=0|matched=0|mismatched=0|probe_failed=0"
         return 0
     }
 
     if ($IsDryRun) {
         Write-Host "Dry run - the following file(s) would be probed:"
         foreach ($c in $candidates) { Write-Host "  $($c.File.FullName)" }
-        Write-Host "SUMMARY|tool=vidtranscribe|status=noop|dry_run=true|total=$($VideoFiles.Count)|checked=0|matched=0|mismatched=0|probe_failed=0"
+        Write-Host "SUMMARY|tool=vidtranscribe|status=noop|dry_run=true|total=$($VideoFiles.Count)|already_verified=$alreadyVerified|checked=0|matched=0|mismatched=0|probe_failed=0"
         return 0
     }
 
@@ -522,7 +554,7 @@ function Invoke-LanguageRecheck {
         $confirm = Read-Host "$($verb.Substring(0,1).ToUpperInvariant())$($verb.Substring(1)) $($candidates.Count) file(s)? This can take a while. (Y/N)"
         if ($confirm -notmatch '^[Yy]') {
             Write-Host "Aborted."
-            Write-Host "SUMMARY|tool=vidtranscribe|status=aborted|dry_run=false|total=$($VideoFiles.Count)|checked=0|matched=0|mismatched=0|probe_failed=0"
+            Write-Host "SUMMARY|tool=vidtranscribe|status=aborted|dry_run=false|total=$($VideoFiles.Count)|already_verified=$alreadyVerified|checked=0|matched=0|mismatched=0|probe_failed=0"
             return 0
         }
     }
@@ -563,6 +595,13 @@ function Invoke-LanguageRecheck {
         if ($probed -eq $recordedLanguage) {
             Write-Host "  OK ($recordedLanguage): $($c.File.FullName)"
             $matched++
+            try {
+                $existingJson | Add-Member -NotePropertyName 'vidtranscribe_probe_version' -NotePropertyValue $LanguageProbeVersion -Force
+                ($existingJson | ConvertTo-Json -Depth 20) | Set-Content -LiteralPath $c.JsonPath -NoNewline
+            }
+            catch {
+                Write-Host "    Warning: could not stamp probe version on $($c.JsonPath): $($_.Exception.Message)"
+            }
         }
         else {
             $mismatched++
@@ -592,14 +631,14 @@ function Invoke-LanguageRecheck {
     Write-Host ""
     Write-Host "Done."
     $status = if ($probeFailed -gt 0) { "failed" } else { "ok" }
-    Write-Host "SUMMARY|tool=vidtranscribe|status=$status|dry_run=false|total=$($VideoFiles.Count)|checked=$($candidates.Count)|matched=$matched|mismatched=$mismatched|probe_failed=$probeFailed"
+    Write-Host "SUMMARY|tool=vidtranscribe|status=$status|dry_run=false|total=$($VideoFiles.Count)|already_verified=$alreadyVerified|checked=$($candidates.Count)|matched=$matched|mismatched=$mismatched|probe_failed=$probeFailed"
 
     if ($status -eq "failed") { return 1 }
     return 0
 }
 
 if ($RecheckLanguage) {
-    $exitCode = Invoke-LanguageRecheck -VideoFiles $videoFiles -MaxFiles $resolvedMaxFiles -ModelsPath $resolvedModelsPath -DockerImage $resolvedDockerImage -Device $resolvedDevice -ComputeType $resolvedComputeType -Fix:$FixMismatches.IsPresent -IsDryRun:$DryRun.IsPresent -IsNoConfirm:$NoConfirm.IsPresent
+    $exitCode = Invoke-LanguageRecheck -VideoFiles $videoFiles -MaxFiles $resolvedMaxFiles -ModelsPath $resolvedModelsPath -DockerImage $resolvedDockerImage -Device $resolvedDevice -ComputeType $resolvedComputeType -LanguageProbeVersion $LanguageProbeVersion -Fix:$FixMismatches.IsPresent -IsDryRun:$DryRun.IsPresent -IsNoConfirm:$NoConfirm.IsPresent -Force:$ForceRecheck.IsPresent
     exit $exitCode
 }
 
@@ -877,11 +916,13 @@ foreach ($item in $toProcess) {
                         # unconditionally overwritten to its "en" default whenever
                         # no --language was forced (see comment above). Correct it
                         # here so the sidecar we keep long-term reflects the real
-                        # detected language, not that artifact.
-                        if ([string]$jsonObj.language -ne $detectedLanguage) {
-                            $jsonObj | Add-Member -NotePropertyName 'language' -NotePropertyValue $detectedLanguage -Force
-                            ($jsonObj | ConvertTo-Json -Depth 20) | Set-Content -LiteralPath $jsonTemp -NoNewline
-                        }
+                        # detected language, not that artifact. Also stamp the
+                        # probe-logic version so a future -RecheckLanguage run can
+                        # tell this file was already produced/verified under the
+                        # current logic and skip re-probing it.
+                        $jsonObj | Add-Member -NotePropertyName 'language' -NotePropertyValue $detectedLanguage -Force
+                        $jsonObj | Add-Member -NotePropertyName 'vidtranscribe_probe_version' -NotePropertyValue $LanguageProbeVersion -Force
+                        ($jsonObj | ConvertTo-Json -Depth 20) | Set-Content -LiteralPath $jsonTemp -NoNewline
                         Move-Item -LiteralPath $srtTemp -Destination $destSrt
                         Move-Item -LiteralPath $jsonTemp -Destination $destJson
                         $success = $true

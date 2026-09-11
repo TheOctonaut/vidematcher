@@ -130,9 +130,19 @@ Files transcribed before these fixes may have been mislabeled - either because t
 .\vidtranscribe.ps1 -Path "Z:\Movies" -NoConfirm
 ```
 
-`-RecheckLanguage` runs the same VAD-based probe against every file that already has a `.vidtranscribe.json` sidecar, and compares it to the language that sidecar originally recorded. With `-FixMismatches`, a disagreement deletes the primary `Movie.<lang>.srt`, the `.vidtranscribe.json` sidecar, and (if the recorded language wasn't English) any derived `Movie.en.srt` translation - since a wrong source language also invalidates anything translated from it. This makes the file fall through cleanly to be picked up and fully retranscribed by a normal run. Files where the probe agrees with the recorded language, or where the probe itself fails, are left untouched. The final `SUMMARY|...` line reports `checked=`/`matched=`/`mismatched=`/`probe_failed=` counts.
+`-RecheckLanguage` runs the same VAD-based probe against every file that already has a `.vidtranscribe.json` sidecar, and compares it to the language that sidecar originally recorded. With `-FixMismatches`, a disagreement deletes the primary `Movie.<lang>.srt`, the `.vidtranscribe.json` sidecar, and (if the recorded language wasn't English) any derived `Movie.en.srt` translation - since a wrong source language also invalidates anything translated from it. This makes the file fall through cleanly to be picked up and fully retranscribed by a normal run. Files where the probe agrees with the recorded language, or where the probe itself fails, are left untouched. The final `SUMMARY|...` line reports `already_verified=`/`checked=`/`matched=`/`mismatched=`/`probe_failed=` counts.
 
 **Caveat for files transcribed before the second (mislabeling) bug was fixed**: because those sidecars' recorded language is unreliable (frequently `en` regardless of the true language), the recheck will flag essentially every genuinely non-English auto-detected file as a mismatch and queue it for reprocessing - even in cases where the original transcript text happened to be correct and only its recorded label was wrong. This is a conservative but safe outcome (reprocessing a file that was already fine just repeats work), and it's the only reliable way to recover trustworthy metadata for those files without inspecting each transcript by hand.
+
+### Skipping files already verified under the current probe logic
+
+Every sidecar written or successfully rechecked stores a `vidtranscribe_probe_version` number alongside `language`, identifying which version of the probing logic produced or last confirmed that language. By default, `-RecheckLanguage` skips any file already stamped with the current version - so as the probing logic keeps improving (e.g. the move to 3-window majority voting), you never have to re-audit a file that's already been verified under today's logic, and can always tell which files still predate a given fix. The number of skipped files is reported both as a `Language recheck: N file(s) already verified...` line and an `already_verified=` count in the final summary.
+
+To force a full re-probe regardless of any existing stamp (e.g. after a probing logic change you want to re-verify everything against), add `-ForceRecheck`:
+
+```powershell
+.\vidtranscribe.ps1 -Path "Z:\Movies" -RecheckLanguage -ForceRecheck
+```
 
 ## Pre-caching alignment models
 
