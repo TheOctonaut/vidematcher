@@ -565,6 +565,8 @@ $script:runState = [PSCustomObject]@{
     Queue       = [System.Collections.Concurrent.ConcurrentQueue[string]]::new()
     LastTotal   = 0
     LastIndex   = 0
+    FileStartTimes  = @{}
+    FileDurations   = [System.Collections.Generic.List[double]]::new()
 }
 
 function Stop-StreamReader {
@@ -596,6 +598,22 @@ function Add-OutputLine {
     $outputText.AppendText($Line)
 }
 
+function Format-Eta {
+    param([double]$Seconds)
+
+    if ($Seconds -lt 0) { $Seconds = 0 }
+    $ts = [TimeSpan]::FromSeconds($Seconds)
+    if ($ts.TotalHours -ge 1) {
+        return "{0}h {1}m" -f [int]$ts.TotalHours, $ts.Minutes
+    }
+    elseif ($ts.TotalMinutes -ge 1) {
+        return "{0}m {1}s" -f [int]$ts.TotalMinutes, $ts.Seconds
+    }
+    else {
+        return "{0}s" -f [int][Math]::Ceiling($ts.TotalSeconds)
+    }
+}
+
 function Update-ProgressFromLine {
     param([string]$Line)
 
@@ -605,11 +623,24 @@ function Update-ProgressFromLine {
         $index = 0
         if ($map.ContainsKey("total")) { [void][int]::TryParse($map["total"], [ref]$total) }
         if ($map.ContainsKey("index")) { [void][int]::TryParse($map["index"], [ref]$index) }
+        $event = if ($map.ContainsKey("event")) { $map["event"] } else { "" }
+
+        if ($event -eq "start" -and $index -gt 0) {
+            $script:runState.FileStartTimes[$index] = Get-Date
+        }
+        elseif ($event -eq "complete" -and $index -gt 0) {
+            $startedAt = $script:runState.FileStartTimes[$index]
+            if ($null -ne $startedAt) {
+                $elapsed = ((Get-Date) - $startedAt).TotalSeconds
+                if ($elapsed -gt 0) { [void]$script:runState.FileDurations.Add($elapsed) }
+                $script:runState.FileStartTimes.Remove($index)
+            }
+        }
 
         if ($total -gt 0) {
             if ($progressBar.Maximum -ne $total) { $progressBar.Maximum = $total }
             $completed = $index
-            if ($map["event"] -eq "start") { $completed = $index - 1 }
+            if ($event -eq "start") { $completed = $index - 1 }
             if ($completed -lt 0) { $completed = 0 }
             if ($completed -gt $total) { $completed = $total }
             $progressBar.Value = $completed
@@ -617,7 +648,18 @@ function Update-ProgressFromLine {
 
         $fileLabel = if ($map.ContainsKey("file")) { $map["file"] } else { "" }
         if ($total -gt 0) {
-            $statusLabel.Text = "Processing $index/$total`: $fileLabel"
+            $remaining = $total - $completed
+            $etaText = ""
+            if ($remaining -gt 0) {
+                if ($script:runState.FileDurations.Count -gt 0) {
+                    $avgSeconds = ($script:runState.FileDurations | Measure-Object -Average).Average
+                    $etaText = " (ETA: ~{0})" -f (Format-Eta -Seconds ($avgSeconds * $remaining))
+                }
+                else {
+                    $etaText = " (estimating...)"
+                }
+            }
+            $statusLabel.Text = "Processing $index/$total`: $fileLabel$etaText"
         }
     }
     elseif ($Line -match '^SUMMARY\|') {
@@ -706,6 +748,8 @@ function Start-ToolRun {
         $outputText.Clear()
         $progressBar.Value = 0
         $progressBar.Maximum = 1
+        $script:runState.FileStartTimes = @{}
+        $script:runState.FileDurations = [System.Collections.Generic.List[double]]::new()
         $statusLabel.Text = "Running..."
         $runButton.Enabled = $false
         $cancelButton.Enabled = $true

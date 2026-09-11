@@ -35,8 +35,11 @@ settings not exposed here (API keys, `ModelsPath`, `DockerImage`, etc.).
   vocabulary / Refresh Jellyfin library / Dry Run, then click **Run**.
 - The shared progress bar, status label, and output log below the tabs
   update live while the selected tool runs (parsed from its `PROGRESS|...`
-  and `SUMMARY|...` lines). **Cancel** kills the running process (and its
-  child processes, e.g. `ffmpeg`) via `taskkill /T /F`.
+  and `SUMMARY|...` lines). The status line also shows an ETA once at least
+  one file has completed, estimated from the running average per-file time
+  multiplied by the files remaining (shown as "estimating..." until then,
+  and omitted once the last file starts). **Cancel** kills the running
+  process (and its child processes, e.g. `ffmpeg`) via `taskkill /T /F`.
 - Both tools are always launched with `-NoConfirm` since there's no console
   to answer the interactive Y/N prompt.
 
