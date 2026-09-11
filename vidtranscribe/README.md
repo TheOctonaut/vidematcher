@@ -46,7 +46,7 @@ Preview what would be processed without doing any work:
 .\vidtranscribe.ps1 -Path "Z:\Movies" -DryRun
 ```
 
-Force a specific spoken language instead of auto-detecting (recommended if you already know it, since auto-detect only samples the first 30 seconds of audio):
+Force a specific spoken language instead of auto-detecting (useful if you already know it, or to skip the language probe described below):
 
 ```powershell
 .\vidtranscribe.ps1 -Path "Z:\Movies\Un Film\Un Film.mp4" -Language fr
@@ -98,6 +98,42 @@ Directory-mode scanning inspects any existing `Movie.<lang>.srt` next to a video
 
 The final `SUMMARY|...` line reports these translate-only files separately via `translated_only=<count>`, distinct from `processed=<count>` (full transcriptions).
 
+## Language auto-detection accuracy
+
+WhisperX's built-in language auto-detection only looks at the raw first ~30 seconds of audio, with no confidence check. Films very rarely open with true silence there, but many start with a logo sting, music, or an otherwise dialogue-free scene - and some (especially longer, dialogue-sparse "artistic" films) have long wordless stretches anywhere in their runtime, not just the intro. If that first 30-second window has no real speech, WhisperX's guess can be arbitrary, and forcing a mismatched language during transcription is a known way to get garbled or wrong-script subtitle output (including verbatim hallucinated text, not just wrong-script noise).
+
+To avoid this, whenever no `-Language` is forced (and the file isn't `TranslateOnly`), a cheap pre-check runs before the real transcription:
+
+1. `ffmpeg`/`ffprobe`, plus WhisperX's own voice-activity-detection (VAD) model (run standalone via a small helper script, `vad_probe.py`), find where the file actually contains speech across its *entire* runtime - not just a fixed offset or percentage.
+2. One genuine speech window (~45s) is picked from the first half of the runtime and one from the second half, each extracted with `ffmpeg` and run through a fast pass (`--model tiny --no_align`) just to read back the language WhisperX detects for it.
+3. If both windows agree, that language is used for the real transcription. If they disagree, either window can't be found, or either probe fails, the script falls back to WhisperX's normal full-file auto-detection (i.e. no worse than before this feature existed) and prints a note explaining why.
+
+This adds two small `tiny`-model passes per file (a few seconds each) plus one lightweight VAD pass, which is negligible next to the main transcription pass. The container needs the repo's `vad_probe.py` mounted alongside the input/output volumes to run this - handled automatically by the script, nothing to configure.
+
+### A second, independent bug: mislabeled output regardless of detection accuracy
+
+Separately from the above, WhisperX's own CLI has a bug in its output writer: whenever `--language` isn't explicitly passed, it unconditionally overwrites the output JSON's `language` field with its internal default (`en`) right before saving - regardless of what language was actually detected or transcribed. This means that for **any** file transcribed with auto-detection (before this fix), the recorded language in `Movie.vidtranscribe.json` (and therefore the `Movie.<lang>.srt` filename itself) may say `en` even when the real detected/transcribed language was something else entirely, independent of whether the transcription itself was accurate.
+
+This is now worked around: the true detected language is instead read from WhisperX's `Detected language: <code> (<confidence>)` log line (surfaced via `--log-level info`, which does not print any dialogue text), and used for both the probe and, when no language was forced and the probe didn't resolve one, the real transcription's own filename/sidecar. Files transcribed before this fix may still have an incorrect recorded language in their sidecar even if their transcript text itself was fine - see the recheck tooling below.
+
+### Fixing already-transcribed files
+
+Files transcribed before these fixes may have been mislabeled - either because they were genuinely transcribed under the wrong language (the first bug above), or because their recorded language is simply wrong regardless of transcript accuracy (the second bug above). To audit and repair an existing library without a full from-scratch redo:
+
+```powershell
+# Preview only - reports mismatches, changes nothing
+.\vidtranscribe.ps1 -Path "Z:\Movies" -RecheckLanguage
+
+# Deletes the affected subtitle(s)/sidecar for mismatched files only, so a
+# normal run afterwards will reprocess just those files
+.\vidtranscribe.ps1 -Path "Z:\Movies" -RecheckLanguage -FixMismatches
+.\vidtranscribe.ps1 -Path "Z:\Movies" -NoConfirm
+```
+
+`-RecheckLanguage` runs the same VAD-based probe against every file that already has a `.vidtranscribe.json` sidecar, and compares it to the language that sidecar originally recorded. With `-FixMismatches`, a disagreement deletes the primary `Movie.<lang>.srt`, the `.vidtranscribe.json` sidecar, and (if the recorded language wasn't English) any derived `Movie.en.srt` translation - since a wrong source language also invalidates anything translated from it. This makes the file fall through cleanly to be picked up and fully retranscribed by a normal run. Files where the probe agrees with the recorded language, or where the probe itself fails, are left untouched. The final `SUMMARY|...` line reports `checked=`/`matched=`/`mismatched=`/`probe_failed=` counts.
+
+**Caveat for files transcribed before the second (mislabeling) bug was fixed**: because those sidecars' recorded language is unreliable (frequently `en` regardless of the true language), the recheck will flag essentially every genuinely non-English auto-detected file as a mismatch and queue it for reprocessing - even in cases where the original transcript text happened to be correct and only its recorded label was wrong. This is a conservative but safe outcome (reprocessing a file that was already fine just repeats work), and it's the only reliable way to recover trustworthy metadata for those files without inspecting each transcript by hand.
+
 ## Pre-caching alignment models
 
 WhisperX downloads a per-language alignment model the first time it needs that language, and only then - not up front. For most languages this is a small (~360MB) download, but for some (e.g. Portuguese, Russian) it's a large (~1.2GB) Hugging Face download that can stall mid-transcription on a flaky connection, which looks like the whole run has hung.
@@ -112,11 +148,11 @@ This runs `whisperx.alignment.load_align_model()` directly inside the container 
 
 ## Console output
 
-Each real WhisperX pass is run with `--verbose False`, so normal runs only print a `PROGRESS|...` line per file (start/complete) plus the final `SUMMARY|...` line - no per-segment transcript text or WhisperX's own internal `INFO` log lines are echoed to the console or captured in any log file by this script. This was a deliberate choice: the actual dialog content isn't needed to see whether a run succeeded, and keeping it out of console/log output avoids incidentally surfacing potentially sensitive transcript text in shared terminals, screenshots, or saved logs.
+Each real WhisperX pass is run with `--verbose False` plus `--log-level info`, so normal runs print a `PROGRESS|...` line per file (start/complete), the final `SUMMARY|...` line, and WhisperX's own `INFO`-level log lines (e.g. `Detected language: fr (0.98)`, used to work around the mislabeling bug above) - but never per-segment transcript text, which stays suppressed regardless of `--log-level`. This was a deliberate choice: the actual dialog content isn't needed to see whether a run succeeded, and keeping it out of console/log output avoids incidentally surfacing potentially sensitive transcript text in shared terminals, screenshots, or saved logs.
 
 ## Known limitations
 
-- **Mixed-language files**: WhisperX detects one language from the first 30 seconds of audio and transcribes the whole file under that assumption. Files that genuinely switch languages partway through will have degraded accuracy on the non-detected-language portions. Use `-Language` to at least guarantee the majority-language segments are treated correctly, and review manually for full accuracy.
+- **Mixed-language files**: WhisperX transcribes the whole file under a single detected/forced language assumption (see "Language auto-detection accuracy" above for how that language is chosen). Files that genuinely switch languages partway through will have degraded accuracy on the non-primary-language portions. Use `-Language` to at least guarantee the majority-language segments are treated correctly, and review manually for full accuracy.
 - **No speaker diarization yet**: speaker labels (who said what) are not produced in this version. This would require an additional gated pyannote model (extra one-time download, modest processing overhead) and may be added later.
 - **Auto-translation quality**: see the note above about Whisper's built-in translate task being less precise than a dedicated translation model.
 - Only top-level `.mp4` files are scanned when given a directory (no recursion into subfolders).

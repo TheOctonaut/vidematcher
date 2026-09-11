@@ -30,6 +30,12 @@ param(
     [string]$OptionsFile,
 
     [Parameter(Mandatory = $false)]
+    [switch]$RecheckLanguage,
+
+    [Parameter(Mandatory = $false)]
+    [switch]$FixMismatches,
+
+    [Parameter(Mandatory = $false)]
     [switch]$DryRun,
 
     [Parameter(Mandatory = $false)]
@@ -223,6 +229,371 @@ if ($videoFiles.Count -eq 0) {
     exit 0
 }
 
+# ---------------------------------------------------------------------------
+# Language probing
+# ---------------------------------------------------------------------------
+#
+# WhisperX only auto-detects language from the raw first 30 seconds of audio,
+# before any silence/VAD filtering. Films that open with a silent/no-dialogue
+# scene (common for short, visual/artistic pieces) can cause WhisperX to
+# confidently detect the wrong language from that window, then transcribe the
+# whole file assuming that (wrong) language - which can produce garbled or
+# even wrong-script output. To avoid trusting that flawed window, when no
+# explicit -Language is set we run a cheap separate pass first: extract a
+# short clip from a point in the file that's actually likely to contain
+# speech (skipping a detected leading silence), and probe just that clip with
+# a small/fast model to get a real language guess before the full transcription
+# runs. This is also reused by -RecheckLanguage to audit already-processed
+# files without needing to re-transcribe them.
+
+function Get-VideoDurationSeconds {
+    param([Parameter(Mandatory = $true)][string]$FilePath)
+
+    $out = & ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 -- $FilePath 2>$null
+    $seconds = 0.0
+    if ($out -and [double]::TryParse(($out | Select-Object -First 1).Trim(), [System.Globalization.NumberStyles]::Float, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$seconds)) {
+        return $seconds
+    }
+    return $null
+}
+
+function Get-VadSpeechSegments {
+    # Runs WhisperX's own pyannote-based voice-activity detector (via the
+    # standalone vad_probe.py helper) directly against the whole file - much
+    # cheaper than a full transcription pass - and returns the speech segments
+    # it finds as an array of @{ Start = <seconds>; End = <seconds> }. Used to
+    # locate genuine speech-containing windows for language identification,
+    # since fixed time offsets (start-of-file, or a fixed percentage into the
+    # runtime) are unreliable for content with long wordless stretches
+    # (intro music/logos, ambient-only scenes) anywhere in the runtime.
+    # Returns $null on any failure.
+    param(
+        [Parameter(Mandatory = $true)][string]$FilePath,
+        [Parameter(Mandatory = $true)][string]$ModelsPath,
+        [Parameter(Mandatory = $true)][string]$DockerImage,
+        [Parameter(Mandatory = $true)][string]$Device,
+        [Parameter(Mandatory = $true)][string]$ScriptRoot
+    )
+
+    try {
+        $videoDir = Split-Path -Parent $FilePath
+        $fileName = Split-Path -Leaf $FilePath
+
+        $vadArgs = @(
+            'run', '--rm', '--gpus', 'all', '--entrypoint', 'python',
+            '-v', "${ScriptRoot}:/scripts:ro",
+            '-v', "${videoDir}:/input:ro",
+            '-v', "${ModelsPath}:/models",
+            $DockerImage,
+            '/scripts/vad_probe.py',
+            "/input/$fileName"
+        )
+
+        $stdout = & docker @vadArgs 2>$null
+        if ($LASTEXITCODE -ne 0 -or -not $stdout) { return $null }
+
+        $jsonLine = $stdout | Select-Object -Last 1
+        $parsed = $jsonLine | ConvertFrom-Json
+        if ($null -eq $parsed) { return $null }
+        return @($parsed | ForEach-Object { [PSCustomObject]@{ Start = [double]$_.start; End = [double]$_.end } })
+    }
+    catch {
+        return $null
+    }
+}
+
+function Select-SpeechClipWindow {
+    # Picks a window of roughly $ClipSeconds actual speech within
+    # [$MinStart, $MaxEnd), anchored on the longest single VAD segment in that
+    # range and extended forward by merging nearby (small-gap) segments if the
+    # anchor alone is shorter than the target length. Returns $null if no
+    # speech segments fall within the given range at all.
+    param(
+        [Parameter(Mandatory = $true)]$Segments,
+        [Parameter(Mandatory = $true)][double]$ClipSeconds,
+        [Parameter(Mandatory = $true)][double]$MinStart,
+        [Parameter(Mandatory = $true)][double]$MaxEnd,
+        [double]$MaxGapSeconds = 5
+    )
+
+    $inRange = @($Segments | Where-Object { $_.Start -ge $MinStart -and $_.End -le $MaxEnd } | Sort-Object Start)
+    if ($inRange.Count -eq 0) { return $null }
+
+    $anchor = $inRange | Sort-Object { $_.End - $_.Start } -Descending | Select-Object -First 1
+    $windowStart = $anchor.Start
+    $windowEnd = $anchor.End
+
+    foreach ($seg in ($inRange | Where-Object { $_.Start -ge $anchor.Start } | Sort-Object Start)) {
+        if (($windowEnd - $windowStart) -ge $ClipSeconds) { break }
+        if ($seg.Start -le ($windowEnd + $MaxGapSeconds) -and $seg.End -gt $windowEnd) {
+            $windowEnd = $seg.End
+        }
+    }
+
+    $windowEnd = [Math]::Min($windowEnd, $windowStart + $ClipSeconds)
+    return [PSCustomObject]@{ Start = $windowStart; End = $windowEnd }
+}
+
+function Get-LanguageForClip {
+    # Extracts a short audio clip spanning $OffsetSeconds..($OffsetSeconds +
+    # $ClipSeconds) and runs a fast (tiny model, no alignment) WhisperX pass
+    # on it, reading the actually-detected language from its
+    # "Detected language: <code> (<confidence>)" log line rather than the
+    # output JSON's "language" field. WhisperX's own transcribe.py
+    # unconditionally overwrites that JSON field with "align_language" right
+    # before writing output - which defaults to "en" whenever --language
+    # isn't explicitly forced, regardless of what was actually detected - so
+    # the JSON field cannot be trusted for auto-detection. --log-level info
+    # surfaces that log line without --verbose True's per-segment transcript
+    # text (keeps dialogue content out of console/log output). Returns $null
+    # on any failure so callers can fall back gracefully.
+    param(
+        [Parameter(Mandatory = $true)][string]$FilePath,
+        [Parameter(Mandatory = $true)][double]$OffsetSeconds,
+        [Parameter(Mandatory = $true)][double]$ClipSeconds,
+        [Parameter(Mandatory = $true)][string]$ModelsPath,
+        [Parameter(Mandatory = $true)][string]$DockerImage,
+        [Parameter(Mandatory = $true)][string]$Device,
+        [Parameter(Mandatory = $true)][string]$ComputeType
+    )
+
+    $probeDir = $null
+    try {
+        $probeDir = Join-Path $env:TEMP "vidtranscribe_probe_$([guid]::NewGuid().ToString('N'))"
+        $probeOutDir = Join-Path $probeDir "out"
+        New-Item -ItemType Directory -Path $probeOutDir -Force | Out-Null
+        $clipPath = Join-Path $probeDir "clip.wav"
+
+        & ffmpeg -hide_banner -loglevel error -ss $OffsetSeconds -i $FilePath -t $ClipSeconds -vn -ar 16000 -ac 1 -f wav $clipPath 2>$null
+        if (-not (Test-Path -LiteralPath $clipPath -PathType Leaf)) { return $null }
+
+        $probeDockerArgs = @(
+            'run', '--rm', '--gpus', 'all',
+            '-v', "${probeDir}:/input:ro",
+            '-v', "${probeOutDir}:/output",
+            '-v', "${ModelsPath}:/models",
+            $DockerImage,
+            '/input/clip.wav',
+            '--model', 'tiny',
+            '--device', $Device,
+            '--compute_type', $ComputeType,
+            '--no_align',
+            '--output_dir', '/output',
+            '--verbose', 'False',
+            '--log-level', 'info'
+        )
+
+        $probeOutput = & docker @probeDockerArgs 2>&1
+        if ($LASTEXITCODE -ne 0) { return $null }
+
+        foreach ($line in $probeOutput) {
+            if ($line -match 'Detected language:\s*(\w+)') {
+                return $Matches[1]
+            }
+        }
+        return $null
+    }
+    catch {
+        return $null
+    }
+    finally {
+        if ($null -ne $probeDir -and (Test-Path -LiteralPath $probeDir)) {
+            Remove-Item -LiteralPath $probeDir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Get-ProbedLanguage {
+    # WhisperX's own language auto-detection only looks at the raw first ~30s
+    # of audio, with no confidence check - and films very often have long
+    # wordless stretches (intro music/logos, ambient-only scenes) that aren't
+    # limited to the opening. A fixed time offset (even one chosen as a
+    # percentage into the runtime) can still land on a stretch with no real
+    # dialogue. Instead, this runs WhisperX's own voice-activity detector once
+    # across the whole file to find where speech actually is, then probes
+    # language in one genuine-speech window from the first half of the
+    # runtime and one from the second half; if both agree, the language is
+    # trusted, otherwise (or on any failure) the caller falls back to
+    # WhisperX's normal full-file auto-detection.
+    param(
+        [Parameter(Mandatory = $true)][string]$FilePath,
+        [Parameter(Mandatory = $true)][string]$ModelsPath,
+        [Parameter(Mandatory = $true)][string]$DockerImage,
+        [Parameter(Mandatory = $true)][string]$Device,
+        [Parameter(Mandatory = $true)][string]$ComputeType,
+        [Parameter(Mandatory = $true)][string]$ScriptRoot,
+        [double]$ClipSeconds = 45
+    )
+
+    $duration = Get-VideoDurationSeconds -FilePath $FilePath
+    if ($null -eq $duration -or $duration -le 0) {
+        return $null
+    }
+
+    $segments = Get-VadSpeechSegments -FilePath $FilePath -ModelsPath $ModelsPath -DockerImage $DockerImage -Device $Device -ScriptRoot $ScriptRoot
+    if ($null -eq $segments -or $segments.Count -eq 0) {
+        Write-Host "No speech detected anywhere in the file via voice-activity detection; cannot probe language."
+        return $null
+    }
+
+    $midpoint = $duration / 2
+    $window1 = Select-SpeechClipWindow -Segments $segments -ClipSeconds $ClipSeconds -MinStart 0 -MaxEnd $midpoint
+    $window2 = Select-SpeechClipWindow -Segments $segments -ClipSeconds $ClipSeconds -MinStart $midpoint -MaxEnd $duration
+
+    $lang1 = if ($null -ne $window1) {
+        Get-LanguageForClip -FilePath $FilePath -OffsetSeconds $window1.Start -ClipSeconds ($window1.End - $window1.Start) -ModelsPath $ModelsPath -DockerImage $DockerImage -Device $Device -ComputeType $ComputeType
+    }
+    else { $null }
+
+    $lang2 = if ($null -ne $window2) {
+        Get-LanguageForClip -FilePath $FilePath -OffsetSeconds $window2.Start -ClipSeconds ($window2.End - $window2.Start) -ModelsPath $ModelsPath -DockerImage $DockerImage -Device $Device -ComputeType $ComputeType
+    }
+    else { $null }
+
+    if ($null -ne $lang1 -and $null -ne $lang2) {
+        if ($lang1 -eq $lang2) {
+            return $lang1
+        }
+        Write-Host "Language probe disagreement (window1@$($window1.Start)s=$lang1, window2@$($window2.Start)s=$lang2); deferring to normal auto-detection."
+        return $null
+    }
+    if ($null -ne $lang1) { return $lang1 }
+    if ($null -ne $lang2) { return $lang2 }
+    return $null
+}
+
+function Invoke-LanguageRecheck {
+    param(
+        [Parameter(Mandatory = $true)][object[]]$VideoFiles,
+        [Parameter(Mandatory = $true)][int]$MaxFiles,
+        [Parameter(Mandatory = $true)][string]$ModelsPath,
+        [Parameter(Mandatory = $true)][string]$DockerImage,
+        [Parameter(Mandatory = $true)][string]$Device,
+        [Parameter(Mandatory = $true)][string]$ComputeType,
+        [Parameter(Mandatory = $true)][bool]$Fix,
+        [Parameter(Mandatory = $true)][bool]$IsDryRun,
+        [Parameter(Mandatory = $true)][bool]$IsNoConfirm
+    )
+
+    # Only files this tool itself transcribed have a .vidtranscribe.json
+    # sidecar recording the language it originally claimed - that recorded
+    # language is what we compare a fresh probe against. Subtitles obtained
+    # from elsewhere (no sidecar) aren't in scope for this audit.
+    $candidates = New-Object System.Collections.Generic.List[object]
+    foreach ($file in $VideoFiles) {
+        $baseName = [System.IO.Path]::GetFileNameWithoutExtension($file.Name)
+        $jsonPath = Join-Path $file.DirectoryName "$baseName.vidtranscribe.json"
+        if (Test-Path -LiteralPath $jsonPath -PathType Leaf) {
+            $candidates.Add([PSCustomObject]@{ File = $file; BaseName = $baseName; JsonPath = $jsonPath })
+        }
+    }
+
+    if ($MaxFiles -gt 0 -and $candidates.Count -gt $MaxFiles) {
+        $candidates = $candidates.GetRange(0, $MaxFiles)
+    }
+
+    Write-Host ""
+    Write-Host "Language recheck: $($candidates.Count) previously-transcribed file(s) to probe."
+
+    if ($candidates.Count -eq 0) {
+        Write-Host "SUMMARY|tool=vidtranscribe|status=noop|dry_run=$($IsDryRun.ToString().ToLowerInvariant())|total=$($VideoFiles.Count)|checked=0|matched=0|mismatched=0|probe_failed=0"
+        return 0
+    }
+
+    if ($IsDryRun) {
+        Write-Host "Dry run - the following file(s) would be probed:"
+        foreach ($c in $candidates) { Write-Host "  $($c.File.FullName)" }
+        Write-Host "SUMMARY|tool=vidtranscribe|status=noop|dry_run=true|total=$($VideoFiles.Count)|checked=0|matched=0|mismatched=0|probe_failed=0"
+        return 0
+    }
+
+    if (-not $IsNoConfirm) {
+        Write-Host ""
+        $verb = if ($Fix) { "probe and fix mismatches for" } else { "probe" }
+        $confirm = Read-Host "$($verb.Substring(0,1).ToUpperInvariant())$($verb.Substring(1)) $($candidates.Count) file(s)? This can take a while. (Y/N)"
+        if ($confirm -notmatch '^[Yy]') {
+            Write-Host "Aborted."
+            Write-Host "SUMMARY|tool=vidtranscribe|status=aborted|dry_run=false|total=$($VideoFiles.Count)|checked=0|matched=0|mismatched=0|probe_failed=0"
+            return 0
+        }
+    }
+
+    $matched = 0
+    $mismatched = 0
+    $probeFailed = 0
+    $index = 0
+
+    foreach ($c in $candidates) {
+        $index++
+        $safeName = ConvertTo-ProgressValue $c.File.Name
+        Write-Host "PROGRESS|tool=vidtranscribe|event=start|index=$index|total=$($candidates.Count)|file=$safeName"
+
+        $recordedLanguage = $null
+        try {
+            $existingJson = Get-Content -LiteralPath $c.JsonPath -Raw | ConvertFrom-Json
+            if ($null -ne $existingJson.language) { $recordedLanguage = [string]$existingJson.language }
+        }
+        catch { }
+
+        if ([string]::IsNullOrWhiteSpace($recordedLanguage)) {
+            Write-Host "  Skipping (sidecar has no recorded language): $($c.File.FullName)"
+            $probeFailed++
+            Write-Host "PROGRESS|tool=vidtranscribe|event=complete|index=$index|total=$($candidates.Count)|file=$safeName|failed=true"
+            continue
+        }
+
+        $probed = Get-ProbedLanguage -FilePath $c.File.FullName -ModelsPath $ModelsPath -DockerImage $DockerImage -Device $Device -ComputeType $ComputeType -ScriptRoot $scriptRoot
+
+        if ($null -eq $probed) {
+            Write-Host "  Probe failed: $($c.File.FullName)"
+            $probeFailed++
+            Write-Host "PROGRESS|tool=vidtranscribe|event=complete|index=$index|total=$($candidates.Count)|file=$safeName|failed=true"
+            continue
+        }
+
+        if ($probed -eq $recordedLanguage) {
+            Write-Host "  OK ($recordedLanguage): $($c.File.FullName)"
+            $matched++
+        }
+        else {
+            $mismatched++
+            Write-Host "  MISMATCH: recorded=$recordedLanguage probed=$probed : $($c.File.FullName)"
+
+            if ($Fix) {
+                $recordedSrt = Join-Path $c.File.DirectoryName "$($c.BaseName).$recordedLanguage.srt"
+                $pathsToRemove = New-Object System.Collections.Generic.List[string]
+                if (Test-Path -LiteralPath $recordedSrt -PathType Leaf) { $pathsToRemove.Add($recordedSrt) }
+                $pathsToRemove.Add($c.JsonPath)
+                if ($recordedLanguage -ne "en") {
+                    $translatedSrt = Join-Path $c.File.DirectoryName "$($c.BaseName).en.srt"
+                    if (Test-Path -LiteralPath $translatedSrt -PathType Leaf) { $pathsToRemove.Add($translatedSrt) }
+                }
+
+                foreach ($p in $pathsToRemove) {
+                    Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue
+                    Write-Host "    Removed: $p"
+                }
+                Write-Host "    File will be re-transcribed on the next normal vidtranscribe run."
+            }
+        }
+
+        Write-Host "PROGRESS|tool=vidtranscribe|event=complete|index=$index|total=$($candidates.Count)|file=$safeName"
+    }
+
+    Write-Host ""
+    Write-Host "Done."
+    $status = if ($probeFailed -gt 0) { "failed" } else { "ok" }
+    Write-Host "SUMMARY|tool=vidtranscribe|status=$status|dry_run=false|total=$($VideoFiles.Count)|checked=$($candidates.Count)|matched=$matched|mismatched=$mismatched|probe_failed=$probeFailed"
+
+    if ($status -eq "failed") { return 1 }
+    return 0
+}
+
+if ($RecheckLanguage) {
+    $exitCode = Invoke-LanguageRecheck -VideoFiles $videoFiles -MaxFiles $resolvedMaxFiles -ModelsPath $resolvedModelsPath -DockerImage $resolvedDockerImage -Device $resolvedDevice -ComputeType $resolvedComputeType -Fix:$FixMismatches.IsPresent -IsDryRun:$DryRun.IsPresent -IsNoConfirm:$NoConfirm.IsPresent
+    exit $exitCode
+}
+
 function Get-SubtitleStatus {
     param(
         [Parameter(Mandatory = $true)][string]$Directory,
@@ -391,6 +762,19 @@ foreach ($item in $toProcess) {
     else {
         Write-Host "PROGRESS|tool=vidtranscribe|event=start|index=$index|total=$($toProcess.Count)|file=$safeName"
 
+        $languageForRun = $resolvedLanguage
+        if ([string]::IsNullOrWhiteSpace($languageForRun)) {
+            Write-Host "Probing language via voice-activity detection to find genuine speech..."
+            $probedLanguage = Get-ProbedLanguage -FilePath $file.FullName -ModelsPath $resolvedModelsPath -DockerImage $resolvedDockerImage -Device $resolvedDevice -ComputeType $resolvedComputeType -ScriptRoot $scriptRoot
+            if ($null -ne $probedLanguage) {
+                Write-Host "Probed language: $probedLanguage"
+                $languageForRun = $probedLanguage
+            }
+            else {
+                Write-Host "Language probe failed; falling back to the main model's own auto-detection."
+            }
+        }
+
         $tempOutDir = Join-Path $env:TEMP "vidtranscribe_$([guid]::NewGuid().ToString('N'))"
         New-Item -ItemType Directory -Path $tempOutDir -Force | Out-Null
 
@@ -411,16 +795,18 @@ foreach ($item in $toProcess) {
                 '--device', $resolvedDevice,
                 '--compute_type', $resolvedComputeType,
                 '--output_dir', '/output',
-                '--verbose', 'False'
+                '--verbose', 'False',
+                '--log-level', 'info'
             )
-            if (-not [string]::IsNullOrWhiteSpace($resolvedLanguage)) {
-                $dockerArgs += @('--language', $resolvedLanguage)
+            if (-not [string]::IsNullOrWhiteSpace($languageForRun)) {
+                $dockerArgs += @('--language', $languageForRun)
             }
 
             $previousErrorActionPreference = $ErrorActionPreference
             $ErrorActionPreference = 'Continue'
+            $dockerOutputLines = [System.Collections.Generic.List[string]]::new()
             try {
-                & docker @dockerArgs 2>&1 | ForEach-Object { Write-Host $_ }
+                & docker @dockerArgs 2>&1 | ForEach-Object { Write-Host $_; $dockerOutputLines.Add([string]$_) }
             }
             finally {
                 $ErrorActionPreference = $previousErrorActionPreference
@@ -439,8 +825,30 @@ foreach ($item in $toProcess) {
                 }
                 else {
                     $jsonObj = Get-Content -LiteralPath $jsonTemp -Raw | ConvertFrom-Json
-                    $detectedLanguage = if (-not [string]::IsNullOrWhiteSpace($resolvedLanguage)) {
-                        $resolvedLanguage
+
+                    # WhisperX's transcribe.py unconditionally overwrites the output
+                    # JSON's "language" field with its internal "align_language"
+                    # value right before writing - which defaults to "en" whenever
+                    # --language wasn't explicitly passed, regardless of what was
+                    # actually detected. So when no language was forced, the true
+                    # detected language is only recoverable from the "Detected
+                    # language: <code> (<confidence>)" log line (unaffected by
+                    # --verbose) rather than the JSON field.
+                    $loggedLanguage = $null
+                    if ([string]::IsNullOrWhiteSpace($languageForRun)) {
+                        foreach ($line in $dockerOutputLines) {
+                            if ($line -match 'Detected language:\s*(\w+)') {
+                                $loggedLanguage = $Matches[1]
+                                break
+                            }
+                        }
+                    }
+
+                    $detectedLanguage = if (-not [string]::IsNullOrWhiteSpace($languageForRun)) {
+                        $languageForRun
+                    }
+                    elseif (-not [string]::IsNullOrWhiteSpace($loggedLanguage)) {
+                        $loggedLanguage
                     }
                     elseif ($null -ne $jsonObj.language -and -not [string]::IsNullOrWhiteSpace([string]$jsonObj.language)) {
                         [string]$jsonObj.language
@@ -456,6 +864,15 @@ foreach ($item in $toProcess) {
                         Write-Host "Destination already exists, not overwriting: $destSrt / $destJson"
                     }
                     else {
+                        # WhisperX's own output JSON has its "language" field
+                        # unconditionally overwritten to its "en" default whenever
+                        # no --language was forced (see comment above). Correct it
+                        # here so the sidecar we keep long-term reflects the real
+                        # detected language, not that artifact.
+                        if ([string]$jsonObj.language -ne $detectedLanguage) {
+                            $jsonObj | Add-Member -NotePropertyName 'language' -NotePropertyValue $detectedLanguage -Force
+                            ($jsonObj | ConvertTo-Json -Depth 20) | Set-Content -LiteralPath $jsonTemp -NoNewline
+                        }
                         Move-Item -LiteralPath $srtTemp -Destination $destSrt
                         Move-Item -LiteralPath $jsonTemp -Destination $destJson
                         $success = $true
