@@ -377,12 +377,35 @@ $tDryRunCheck.Location = New-Object System.Drawing.Point(16, 165)
 $tDryRunCheck.AutoSize = $true
 $tabTranscribe.Controls.Add($tDryRunCheck)
 
+$tTranslateModelLabel = New-Object System.Windows.Forms.Label
+$tTranslateModelLabel.Text = "Translate Model"
+$tTranslateModelLabel.Location = New-Object System.Drawing.Point(160, 143)
+$tTranslateModelLabel.AutoSize = $true
+$tabTranscribe.Controls.Add($tTranslateModelLabel)
+
+$tTranslateModelText = New-Object System.Windows.Forms.TextBox
+$tTranslateModelText.Location = New-Object System.Drawing.Point(160, 165)
+$tTranslateModelText.Size = New-Object System.Drawing.Size(160, 24)
+$tTranslateModelText.Text = "large-v3"
+if ($null -ne $vidtranscribeDefaults -and $vidtranscribeDefaults.PSObject.Properties.Name -contains "TranslateModel") {
+    $tTranslateModelText.Text = [string]$vidtranscribeDefaults.TranslateModel
+}
+$tabTranscribe.Controls.Add($tTranslateModelText)
+
 $tNoteLabel = New-Object System.Windows.Forms.Label
-$tNoteLabel.Text = "ModelsPath / DockerImage are read from vidtranscribe\options.json (not exposed here)."
-$tNoteLabel.Location = New-Object System.Drawing.Point(16, 200)
+$tNoteLabel.Text = "ModelsPath / DockerImage / WorkerPort are read from vidtranscribe\options.json (not exposed here)."
+$tNoteLabel.Location = New-Object System.Drawing.Point(16, 225)
 $tNoteLabel.AutoSize = $true
 $tNoteLabel.ForeColor = [System.Drawing.Color]::DimGray
 $tabTranscribe.Controls.Add($tNoteLabel)
+
+$tWorkerNoteLabel = New-Object System.Windows.Forms.Label
+$tWorkerNoteLabel.Text = "Transcribe runs a persistent GPU worker container; Cancel stops this script only - the worker keeps running (and finishes any in-flight file) for faster reuse next run."
+$tWorkerNoteLabel.Location = New-Object System.Drawing.Point(16, 245)
+$tWorkerNoteLabel.AutoSize = $true
+$tWorkerNoteLabel.MaximumSize = New-Object System.Drawing.Size(860, 0)
+$tWorkerNoteLabel.ForeColor = [System.Drawing.Color]::DimGray
+$tabTranscribe.Controls.Add($tWorkerNoteLabel)
 
 # ===========================================================================
 # Tag tab
@@ -843,6 +866,7 @@ $runButton.Add_Click({
         if (-not [string]::IsNullOrWhiteSpace($tModelText.Text))    { $arguments += @("-Model", (Escape-Argument -Value $tModelText.Text.Trim())) }
         if (-not [string]::IsNullOrWhiteSpace($tComputeText.Text))  { $arguments += @("-ComputeType", (Escape-Argument -Value $tComputeText.Text.Trim())) }
         if (-not [string]::IsNullOrWhiteSpace($tDeviceCombo.Text))  { $arguments += @("-Device", (Escape-Argument -Value $tDeviceCombo.Text.Trim())) }
+        if (-not [string]::IsNullOrWhiteSpace($tTranslateModelText.Text)) { $arguments += @("-TranslateModel", (Escape-Argument -Value $tTranslateModelText.Text.Trim())) }
         if ($tNoTranslateCheck.Checked) { $arguments += "-NoTranslate" }
         if ($tDryRunCheck.Checked)      { $arguments += "-DryRun" }
 
