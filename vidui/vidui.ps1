@@ -215,6 +215,249 @@ $vidtagDefaults        = Load-OptionsDefaults -OptionsPath (Join-Path $vidtagDir
 $vidtranscribeDefaults = Load-OptionsDefaults -OptionsPath (Join-Path $vidtranscribeDir "options.json")
 
 # ---------------------------------------------------------------------------
+# Status gauge control (owner-drawn pie/donut, no extra chart assembly
+# needed - System.Drawing is already a dependency of this script)
+# ---------------------------------------------------------------------------
+
+function New-StatusGauge {
+    param(
+        [Parameter(Mandatory = $true)][System.Windows.Forms.Control]$Parent,
+        [Parameter(Mandatory = $true)][int]$X,
+        [Parameter(Mandatory = $true)][int]$Y,
+        [int]$Size = 72
+    )
+
+    $panel = New-Object System.Windows.Forms.Panel
+    $panel.Location = New-Object System.Drawing.Point($X, $Y)
+    $panel.Size = New-Object System.Drawing.Size($Size, $Size)
+    # PercentValue is an ad-hoc ETS member (not a real Panel property) used
+    # purely to hand the current percentage to the Paint handler below.
+    $panel | Add-Member -MemberType NoteProperty -Name PercentValue -Value 0.0 -Force
+
+    $panel.Add_Paint({
+        param($sender, $e)
+        $g = $e.Graphics
+        $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+        $pct = [double]$sender.PercentValue
+        if ($pct -lt 0) { $pct = 0 }
+        if ($pct -gt 100) { $pct = 100 }
+
+        $rect = New-Object System.Drawing.Rectangle(2, 2, ($sender.Width - 4), ($sender.Height - 4))
+        $g.FillEllipse([System.Drawing.Brushes]::Gainsboro, $rect)
+
+        if ($pct -gt 0) {
+            $sweep = 360.0 * ($pct / 100.0)
+            $sliceBrush =
+                if ($pct -ge 99.95) { [System.Drawing.Brushes]::ForestGreen }
+                elseif ($pct -ge 50) { [System.Drawing.Brushes]::SteelBlue }
+                else { [System.Drawing.Brushes]::IndianRed }
+            $g.FillPie($sliceBrush, $rect, -90.0, [float]$sweep)
+        }
+
+        $g.DrawEllipse([System.Drawing.Pens]::DarkGray, $rect)
+
+        $innerMargin = [int][Math]::Round($sender.Width * 0.22)
+        $innerSize = $sender.Width - (2 * $innerMargin)
+        $innerRect = New-Object System.Drawing.Rectangle($innerMargin, $innerMargin, $innerSize, $innerSize)
+        $g.FillEllipse([System.Drawing.Brushes]::White, $innerRect)
+
+        $font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
+        $fmt = New-Object System.Drawing.StringFormat
+        $fmt.Alignment = [System.Drawing.StringAlignment]::Center
+        $fmt.LineAlignment = [System.Drawing.StringAlignment]::Center
+        $clientRectF = New-Object System.Drawing.RectangleF(0, 0, $sender.Width, $sender.Height)
+        $g.DrawString(("{0:0}%" -f $pct), $font, [System.Drawing.Brushes]::Black, $clientRectF, $fmt)
+        $font.Dispose()
+        $fmt.Dispose()
+    })
+
+    $Parent.Controls.Add($panel)
+    return $panel
+}
+
+function Set-StatusGauge {
+    param(
+        [Parameter(Mandatory = $true)]$Gauge,
+        [Parameter(Mandatory = $true)][double]$Percent
+    )
+    $Gauge.PercentValue = $Percent
+    $Gauge.Invalidate()
+}
+
+# ---------------------------------------------------------------------------
+# Background status scans (folder-completeness checks). Each scan runs on a
+# separate PowerShell instance via BeginInvoke so a big/slow (e.g. network
+# share) recursive scan never freezes the UI thread; a shared timer polls
+# for completion, the same pattern used for the tool-run stdout readers.
+# ---------------------------------------------------------------------------
+
+$script:pendingScans = [System.Collections.Generic.List[object]]::new()
+
+function Start-StatusScan {
+    param(
+        [Parameter(Mandatory = $true)][scriptblock]$ScriptBlock,
+        [Parameter(Mandatory = $false)][object[]]$ArgumentList = @(),
+        [Parameter(Mandatory = $true)][scriptblock]$OnComplete
+    )
+
+    $ps = [powershell]::Create()
+    [void]$ps.AddScript($ScriptBlock)
+    foreach ($argItem in $ArgumentList) { [void]$ps.AddArgument($argItem) }
+    $handle = $ps.BeginInvoke()
+    $script:pendingScans.Add([PSCustomObject]@{ PowerShell = $ps; Handle = $handle; OnComplete = $OnComplete })
+}
+
+$statusScanTimer = New-Object System.Windows.Forms.Timer
+$statusScanTimer.Interval = 250
+$statusScanTimer.Add_Tick({
+    for ($i = $script:pendingScans.Count - 1; $i -ge 0; $i--) {
+        $job = $script:pendingScans[$i]
+        if ($job.Handle.IsCompleted) {
+            $result = $null
+            try {
+                $result = $job.PowerShell.EndInvoke($job.Handle)
+                if ($result -is [array]) { $result = $result | Select-Object -Last 1 }
+            }
+            catch {
+                $result = $null
+            }
+            try { & $job.OnComplete $result } catch { }
+            $job.PowerShell.Dispose()
+            $script:pendingScans.RemoveAt($i)
+        }
+    }
+})
+$statusScanTimer.Start()
+
+# Scans a Transcribe -Path (file or flat folder, matching vidtranscribe.ps1's
+# own non-recursive *.mp4 scan) and reports how many videos are "up to date":
+# have an English subtitle AND a .vidtranscribe.json stamped with a probe
+# version >= the caller-supplied $LanguageProbeVersion (so files transcribed
+# under older language-detection logic show as not-yet-up-to-date, matching
+# the -RecheckLanguage workflow).
+$transcribeScanScript = {
+    param($Path, $LanguageProbeVersion)
+
+    $result = [PSCustomObject]@{ Error = $null; Total = 0; UpToDate = 0; Percent = 0.0 }
+
+    try {
+        if (-not (Test-Path -LiteralPath $Path)) {
+            $result.Error = "Path not found."
+            return $result
+        }
+
+        $item = Get-Item -LiteralPath $Path
+        $videoFiles = if ($item.PSIsContainer) {
+            @(Get-ChildItem -LiteralPath $Path -Filter "*.mp4" -File -ErrorAction SilentlyContinue)
+        }
+        else {
+            @($item)
+        }
+
+        $result.Total = $videoFiles.Count
+        if ($result.Total -eq 0) { return $result }
+
+        $upToDate = 0
+        foreach ($file in $videoFiles) {
+            $dir = $file.DirectoryName
+            $baseName = [System.IO.Path]::GetFileNameWithoutExtension($file.Name)
+            $escapedName = [regex]::Escape($baseName)
+            $taggedPattern = "^$escapedName\.([A-Za-z]{2,3})\.srt$"
+
+            $hasEnglish = $false
+            $existingSrt = Get-ChildItem -LiteralPath $dir -File -Filter "$baseName*.srt" -ErrorAction SilentlyContinue
+            foreach ($s in $existingSrt) {
+                if ($s.Name -match $taggedPattern -and $Matches[1].ToLowerInvariant() -eq "en") {
+                    $hasEnglish = $true
+                    break
+                }
+            }
+            if (-not $hasEnglish) { continue }
+
+            $jsonPath = Join-Path $dir "$baseName.vidtranscribe.json"
+            if (-not (Test-Path -LiteralPath $jsonPath -PathType Leaf)) { continue }
+
+            try {
+                $raw = Get-Content -LiteralPath $jsonPath -Raw
+                if (-not [string]::IsNullOrWhiteSpace($raw)) {
+                    $j = $raw | ConvertFrom-Json
+                    if ($null -ne $j.vidtranscribe_probe_version -and [int]$j.vidtranscribe_probe_version -ge $LanguageProbeVersion) {
+                        $upToDate++
+                    }
+                }
+            }
+            catch { }
+        }
+
+        $result.UpToDate = $upToDate
+        $result.Percent = [math]::Round((100.0 * $upToDate / $result.Total), 1)
+    }
+    catch {
+        $result.Error = $_.Exception.Message
+    }
+
+    return $result
+}
+
+# Scans a Tag scan-path recursively for *.vidtranscribe.json sidecars
+# (matching vidtag.ps1's own recursive scan), and reports how many of the
+# ones eligible for tagging (a matching .nfo exists alongside) already have
+# vidtag_processed = true.
+$tagScanScript = {
+    param($Path)
+
+    $result = [PSCustomObject]@{ Error = $null; Eligible = 0; Processed = 0; Percent = 0.0; NoNfo = 0 }
+
+    try {
+        if (-not (Test-Path -LiteralPath $Path)) {
+            $result.Error = "Path not found."
+            return $result
+        }
+
+        $transcriptFiles = @(Get-ChildItem -LiteralPath $Path -Recurse -Filter "*.vidtranscribe.json" -File -ErrorAction SilentlyContinue)
+        if ($transcriptFiles.Count -eq 0) { return $result }
+
+        $eligible = 0
+        $processed = 0
+        $noNfo = 0
+
+        foreach ($tf in $transcriptFiles) {
+            $dir = $tf.DirectoryName
+            $baseName = $tf.Name -replace '\.vidtranscribe\.json$', ''
+            $nfoPath = Join-Path $dir ($baseName + ".nfo")
+            if (-not (Test-Path -LiteralPath $nfoPath -PathType Leaf)) {
+                $noNfo++
+                continue
+            }
+
+            $eligible++
+            try {
+                $raw = Get-Content -LiteralPath $tf.FullName -Raw
+                if (-not [string]::IsNullOrWhiteSpace($raw)) {
+                    $j = $raw | ConvertFrom-Json
+                    if ($j.PSObject.Properties.Name -contains "vidtag_processed" -and $j.vidtag_processed -eq $true) {
+                        $processed++
+                    }
+                }
+            }
+            catch { }
+        }
+
+        $result.Eligible = $eligible
+        $result.Processed = $processed
+        $result.NoNfo = $noNfo
+        if ($eligible -gt 0) {
+            $result.Percent = [math]::Round((100.0 * $processed / $eligible), 1)
+        }
+    }
+    catch {
+        $result.Error = $_.Exception.Message
+    }
+
+    return $result
+}
+
+# ---------------------------------------------------------------------------
 # Main form
 # ---------------------------------------------------------------------------
 
@@ -283,6 +526,57 @@ $tPathBrowseFile.Add_Click({
     }
 })
 $tabTranscribe.Controls.Add($tPathBrowseFile)
+
+$tStatusGauge = New-StatusGauge -Parent $tabTranscribe -X 828 -Y 8 -Size 64
+
+$tStatusButton = New-Object System.Windows.Forms.Button
+$tStatusButton.Text = "Check Status"
+$tStatusButton.Location = New-Object System.Drawing.Point(700, 16)
+$tStatusButton.Size = New-Object System.Drawing.Size(120, 28)
+$tabTranscribe.Controls.Add($tStatusButton)
+
+$tStatusLabel = New-Object System.Windows.Forms.Label
+$tStatusLabel.Text = "Not checked"
+$tStatusLabel.Location = New-Object System.Drawing.Point(700, 50)
+$tStatusLabel.Size = New-Object System.Drawing.Size(120, 44)
+$tStatusLabel.ForeColor = [System.Drawing.Color]::DimGray
+$tabTranscribe.Controls.Add($tStatusLabel)
+
+$tStatusButton.Add_Click({
+    $path = $tPathText.Text.Trim()
+    if ([string]::IsNullOrWhiteSpace($path) -or -not (Test-Path -LiteralPath $path)) {
+        [System.Windows.Forms.MessageBox]::Show("Enter or browse to a valid file/folder first.", "Validation", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null
+        return
+    }
+
+    $probeVersion = 1
+    try {
+        $probeMatch = [regex]::Match((Get-Content -LiteralPath $VidtranscribeScript -Raw), '\$LanguageProbeVersion\s*=\s*(\d+)')
+        if ($probeMatch.Success) { $probeVersion = [int]$probeMatch.Groups[1].Value }
+    }
+    catch { }
+
+    $tStatusButton.Enabled = $false
+    $tStatusLabel.Text = "Scanning..."
+
+    Start-StatusScan -ScriptBlock $transcribeScanScript -ArgumentList @($path, $probeVersion) -OnComplete {
+        param($result)
+        $tStatusButton.Enabled = $true
+        if ($null -eq $result -or $null -ne $result.Error) {
+            $tStatusLabel.Text = if ($null -ne $result -and $result.Error) { "Error: $($result.Error)" } else { "Scan failed." }
+            Set-StatusGauge -Gauge $tStatusGauge -Percent 0
+            return
+        }
+        if ($result.Total -eq 0) {
+            $tStatusLabel.Text = "No .mp4 files found."
+            Set-StatusGauge -Gauge $tStatusGauge -Percent 0
+        }
+        else {
+            $tStatusLabel.Text = "$($result.UpToDate) / $($result.Total) up to date"
+            Set-StatusGauge -Gauge $tStatusGauge -Percent $result.Percent
+        }
+    }
+})
 
 $tLanguageLabel = New-Object System.Windows.Forms.Label
 $tLanguageLabel.Text = "Language (blank = auto-detect)"
@@ -440,6 +734,50 @@ $gScanBrowse.Add_Click({
     }
 })
 $tabTag.Controls.Add($gScanBrowse)
+
+$gStatusGauge = New-StatusGauge -Parent $tabTag -X 828 -Y 8 -Size 64
+
+$gStatusButton = New-Object System.Windows.Forms.Button
+$gStatusButton.Text = "Check Status"
+$gStatusButton.Location = New-Object System.Drawing.Point(700, 16)
+$gStatusButton.Size = New-Object System.Drawing.Size(120, 28)
+$tabTag.Controls.Add($gStatusButton)
+
+$gStatusLabel = New-Object System.Windows.Forms.Label
+$gStatusLabel.Text = "Not checked"
+$gStatusLabel.Location = New-Object System.Drawing.Point(700, 50)
+$gStatusLabel.Size = New-Object System.Drawing.Size(120, 44)
+$gStatusLabel.ForeColor = [System.Drawing.Color]::DimGray
+$tabTag.Controls.Add($gStatusLabel)
+
+$gStatusButton.Add_Click({
+    $path = $gScanText.Text.Trim()
+    if ([string]::IsNullOrWhiteSpace($path) -or -not (Test-Path -LiteralPath $path -PathType Container)) {
+        [System.Windows.Forms.MessageBox]::Show("Enter or browse to a valid scan folder first.", "Validation", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null
+        return
+    }
+
+    $gStatusButton.Enabled = $false
+    $gStatusLabel.Text = "Scanning..."
+
+    Start-StatusScan -ScriptBlock $tagScanScript -ArgumentList @($path) -OnComplete {
+        param($result)
+        $gStatusButton.Enabled = $true
+        if ($null -eq $result -or $null -ne $result.Error) {
+            $gStatusLabel.Text = if ($null -ne $result -and $result.Error) { "Error: $($result.Error)" } else { "Scan failed." }
+            Set-StatusGauge -Gauge $gStatusGauge -Percent 0
+            return
+        }
+        if ($result.Eligible -eq 0) {
+            $gStatusLabel.Text = "No taggable files found."
+            Set-StatusGauge -Gauge $gStatusGauge -Percent 0
+        }
+        else {
+            $gStatusLabel.Text = "$($result.Processed) / $($result.Eligible) tagged"
+            Set-StatusGauge -Gauge $gStatusGauge -Percent $result.Percent
+        }
+    }
+})
 
 $gMaxFilesLabel = New-Object System.Windows.Forms.Label
 $gMaxFilesLabel.Text = "Max Files (0 = unlimited)"
