@@ -66,13 +66,15 @@ CLI arguments override `options.json`, which overrides script defaults. `ModelsP
 | --- | --- | --- | --- |
 | `ModelsPath` | `-ModelsPath` | *(required)* | Folder used as the persistent Hugging Face/torch model cache. |
 | `DockerImage` | `-DockerImage` | `vidtranscribe:latest` | Image built by `build-vidtranscribe.ps1`. |
-| `Model` | `-Model` | `turbo` | WhisperX/faster-whisper model size (`turbo` is a good speed/accuracy balance for 12GB VRAM). |
+| `Model` | `-Model` | `turbo` | WhisperX/faster-whisper model size (`turbo` is a good speed/accuracy balance for 12GB VRAM). Used for the main transcription pass only. |
+| `TranslateModel` | `-TranslateModel` | `large-v3` | Model used only for the `translate` pass (see "Translation model" below). Distilled models like `turbo` have degraded translate-task quality, so this defaults to a separate, undistilled model. |
 | `ComputeType` | `-ComputeType` | `float16` | Passed through to WhisperX. |
 | `Device` | `-Device` | `cuda` | Use `cpu` to force CPU transcription (much slower). |
 | `Language` | `-Language` | *(auto-detect)* | ISO 639-1 code (e.g. `en`, `fr`). Forces language instead of auto-detecting. |
 | `MaxFiles` | `-MaxFiles` | `0` (no limit) | In directory mode, caps how many eligible files are processed in one run. Files beyond the limit are left for a subsequent run. Has no effect on a single-file `-Path`. |
 | `AutoTranslate` | `-NoTranslate` (to disable) | `true` | When the detected/forced source language isn't English, also runs WhisperX's built-in `--task translate` and writes an additional `Movie.en.srt`. Set `"AutoTranslate": false` in `options.json`, or pass `-NoTranslate`, to skip this. |
 | `MinFreeDiskSpaceMB` | `-MinFreeDiskSpaceMB` | `50` | Checked before each file: if the destination drive has less than this much free space, the run stops immediately (no more files attempted) instead of continuing to burn GPU time on transcriptions that would just fail to save. Set to `0` to disable. |
+| `WorkerPort` | `-WorkerPort` | `8756` | TCP port the persistent worker (see below) listens on, on `127.0.0.1` only. Change it if something else on the machine already uses port 8756. |
 
 `-OptionsFile` selects an alternate options file. `-DryRun` previews without transcribing. `-NoConfirm` skips the confirmation prompt (for automation).
 
@@ -107,17 +109,17 @@ WhisperX's built-in language auto-detection only looks at the raw first ~30 seco
 
 To avoid this, whenever no `-Language` is forced (and the file isn't `TranslateOnly`), a cheap pre-check runs before the real transcription:
 
-1. `ffmpeg`/`ffprobe`, plus WhisperX's own voice-activity-detection (VAD) model (run standalone via a small helper script, `vad_probe.py`), find where the file actually contains speech across its *entire* runtime - not just a fixed offset or percentage.
-2. One genuine speech window (~45s) is picked from each third of the runtime (first/middle/last), each extracted with `ffmpeg` and run through a fast pass (`--model tiny --no_align`) just to read back the language WhisperX detects for it.
+1. `ffmpeg`/`ffprobe`, plus WhisperX's own voice-activity-detection (VAD) model (run inside the persistent worker via its `/vad` endpoint), find where the file actually contains speech across its *entire* runtime - not just a fixed offset or percentage.
+2. One genuine speech window (~45s) is picked from each third of the runtime (first/middle/last), each extracted with `ffmpeg` and sent to the worker's `/probe_language` endpoint, which runs a fast `tiny`-model pass (no alignment) and returns the detected language for that clip directly.
 3. If two or three windows agree, that majority language is used for the real transcription. A genuine three-way split (all different) falls back to English if English was one of the three guesses - a fair default for this library, where short/ambiguous dialogue (e.g. brief or non-verbal audio) is disproportionately likely to actually be English even when a probe window misreads it as something else. If English wasn't among the guesses, or fewer than two windows could be probed at all (e.g. no speech found in a given third), the script falls back to WhisperX's normal full-file auto-detection (i.e. no worse than before this feature existed) and prints a note explaining why.
 
-This adds up to three small `tiny`-model passes per file (a few seconds each) plus one lightweight VAD pass, which is negligible next to the main transcription pass. The container needs the repo's `vad_probe.py` mounted alongside the input/output volumes to run this - handled automatically by the script, nothing to configure.
+This adds up to three small `tiny`-model passes per file (a few seconds each once the worker's models are warm) plus one lightweight VAD pass, which is negligible next to the main transcription pass. The standalone `vad_probe.py` script that originally proved out this VAD approach still exists in this folder as a diagnostic reference, but is no longer invoked by `vidtranscribe.ps1` itself - the worker (`server.py`) has its own equivalent, always-warm VAD model instead.
 
 ### A second, independent bug: mislabeled output regardless of detection accuracy
 
 Separately from the above, WhisperX's own CLI has a bug in its output writer: whenever `--language` isn't explicitly passed, it unconditionally overwrites the output JSON's `language` field with its internal default (`en`) right before saving - regardless of what language was actually detected or transcribed. This means that for **any** file transcribed with auto-detection (before this fix), the recorded language in `Movie.vidtranscribe.json` (and therefore the `Movie.<lang>.srt` filename itself) may say `en` even when the real detected/transcribed language was something else entirely, independent of whether the transcription itself was accurate.
 
-This is now worked around: the true detected language is instead read from WhisperX's `Detected language: <code> (<confidence>)` log line (surfaced via `--log-level info`, which does not print any dialogue text), and used for both the probe and, when no language was forced and the probe didn't resolve one, the real transcription's own filename/sidecar. Files transcribed before this fix may still have an incorrect recorded language in their sidecar even if their transcript text itself was fine - see the recheck tooling below.
+This is now worked around: the persistent worker captures the true detected language directly from WhisperX's own `result["language"]` value (before its CLI writer would have overwritten it) and returns it as a structured `detected_language` field in its `/transcribe` response, used for both the probe and, when no language was forced and the probe didn't resolve one, the real transcription's own filename/sidecar. Files transcribed before this fix may still have an incorrect recorded language in their sidecar even if their transcript text itself was fine - see the recheck tooling below.
 
 ### Fixing already-transcribed files
 
@@ -175,15 +177,41 @@ If you know in advance which non-English languages you'll be transcribing, pre-d
 
 This runs `whisperx.alignment.load_align_model()` directly inside the container **on the CPU** (never the GPU), so it's safe to run alongside a live GPU transcription batch without contention. It uses the same `ModelsPath`/`DockerImage` as `vidtranscribe.ps1` (from `options.json` by default, or override with `-ModelsPath`/`-DockerImage`), so the cached models are actually reused by later real runs.
 
+## Persistent worker (model reload elimination)
+
+Every VAD scan, language-probe clip, transcription, and translation used to be its own fresh `docker run --rm ...` invocation, each one reloading every model (VAD, tiny probe, main transcription model, alignment model) from disk before doing any real work - measured at roughly 15-50 seconds of pure reload overhead per file, out of typical total per-file times of 60-160 seconds.
+
+Instead, `vidtranscribe.ps1` now starts a single long-lived container (`vidtranscribe-worker`, running `server.py`) the first time it's needed, and talks to it over a local HTTP API (`127.0.0.1:<WorkerPort>`) for every VAD scan, language probe, transcription, and translation in the run. Models are loaded lazily on first use and kept resident in GPU memory, so only the very first call of each kind pays the reload cost - every call after that is fast.
+
+The worker is **intentionally left running after the script exits**, rather than being stopped automatically, so its warm models are still reused the next time you run `vidtranscribe.ps1` (even hours later) instead of paying full reload cost again on every separate invocation. It's idempotent and safe to leave running: the next run reuses it automatically if it's already healthy and configured with the same `Model`/`TranslateModel`/`Device`/`ComputeType`, or transparently restarts it if those have changed.
+
+To free the GPU memory it holds (e.g. before running something else GPU-heavy), stop it manually:
+
+```powershell
+docker stop vidtranscribe-worker
+```
+
+It will be started again automatically the next time it's needed. To inspect its logs (e.g. if a run reports the worker failed to become healthy):
+
+```powershell
+docker logs vidtranscribe-worker
+```
+
+### Translation model
+
+The main `Model` (`turbo` by default) is fast but, like other distilled Whisper variants, has its decoder pruned in a way that specifically degrades `translate`-task quality - `turbo`'s English translations of non-English audio can come out barely translated at all, even though its normal (same-language) transcription is fine. Because of this, the worker keeps a **separate** model resident just for the `translate` pass: `TranslateModel`, defaulting to `large-v3` (a full, undistilled model). The main transcription pass always uses `Model`; only the optional translate pass (non-English files, when `AutoTranslate` is on) uses `TranslateModel` - English-source files never load it at all, since they never call `/translate`.
+
+Both models stay loaded simultaneously once each has been used at least once - on a 12GB GPU this comfortably fits alongside the VAD/tiny-probe/alignment models already resident. The first translate call in a given worker's lifetime pays a one-time `large-v3` load cost (a few seconds); every translate call after that is warm, same as everything else.
+
 ## Console output
 
-Each real WhisperX pass is run with `--verbose False` plus `--log-level info`, so normal runs print a `PROGRESS|...` line per file (start/complete), the final `SUMMARY|...` line, and WhisperX's own `INFO`-level log lines (e.g. `Detected language: fr (0.98)`, used to work around the mislabeling bug above) - but never per-segment transcript text, which stays suppressed regardless of `--log-level`. This was a deliberate choice: the actual dialog content isn't needed to see whether a run succeeded, and keeping it out of console/log output avoids incidentally surfacing potentially sensitive transcript text in shared terminals, screenshots, or saved logs.
+Each real WhisperX pass runs inside the persistent worker (see above) rather than as a separate `docker run` with its own console output, so normal runs print just a `PROGRESS|...` line per file (start/complete/translate_start) plus the final `SUMMARY|...` line - no per-file WhisperX log noise. The worker itself prints only a one-line startup banner (`vidtranscribe worker listening on port ...`) to its own container logs (`docker logs vidtranscribe-worker`), not to the script's console output. The worker returns the true detected language directly as a structured field in its HTTP responses (see "Language auto-detection accuracy" below for why this matters), so there's no need to scrape log lines for it any more.
 
 ## Known limitations
 
 - **Mixed-language files**: WhisperX transcribes the whole file under a single detected/forced language assumption (see "Language auto-detection accuracy" above for how that language is chosen). Files that genuinely switch languages partway through will have degraded accuracy on the non-primary-language portions. Use `-Language` to at least guarantee the majority-language segments are treated correctly, and review manually for full accuracy.
 - **No speaker diarization yet**: speaker labels (who said what) are not produced in this version. This would require an additional gated pyannote model (extra one-time download, modest processing overhead) and may be added later.
-- **Auto-translation quality**: see the note above about Whisper's built-in translate task being less precise than a dedicated translation model.
+- **Auto-translation quality**: see the note above about Whisper's built-in translate task being less precise than a dedicated translation model. Separately, distilled models like `turbo` have their decoder specifically pruned in a way that guts translate-task quality - which is why translation now uses a separate `TranslateModel` (`large-v3` by default) instead of the main `Model` (see "Translation model" below).
 - Only top-level `.mp4` files are scanned when given a directory (no recursion into subfolders).
 
 ## Suppressed container warnings

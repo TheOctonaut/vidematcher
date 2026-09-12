@@ -9,6 +9,9 @@ param(
     [string]$Model,
 
     [Parameter(Mandatory = $false)]
+    [string]$TranslateModel,
+
+    [Parameter(Mandatory = $false)]
     [string]$ComputeType,
 
     [Parameter(Mandatory = $false)]
@@ -46,6 +49,9 @@ param(
 
     [Parameter(Mandatory = $false)]
     [int]$MinFreeDiskSpaceMB,
+
+    [Parameter(Mandatory = $false)]
+    [int]$WorkerPort,
 
     [Parameter(Mandatory = $false)]
     [switch]$DryRun,
@@ -107,10 +113,11 @@ function ConvertTo-ProgressValue {
 }
 
 $defaults = [PSCustomObject]@{
-    DockerImage = "vidtranscribe:latest"
-    Model       = "turbo"
-    ComputeType = "float16"
-    Device      = "cuda"
+    DockerImage    = "vidtranscribe:latest"
+    Model          = "turbo"
+    TranslateModel = "large-v3"
+    ComputeType    = "float16"
+    Device         = "cuda"
 }
 
 if (-not (Test-Path -LiteralPath $OptionsFile -PathType Leaf)) {
@@ -177,6 +184,14 @@ else {
     if ($null -ne $v) { $v } else { $defaults.Model }
 }
 
+$resolvedTranslateModel = if ($PSBoundParameters.ContainsKey("TranslateModel")) {
+    $TranslateModel
+}
+else {
+    $v = Normalize-OptionalString (Get-OptionValue -Options $fileOptions -Name "TranslateModel")
+    if ($null -ne $v) { $v } else { $defaults.TranslateModel }
+}
+
 $resolvedComputeType = if ($PSBoundParameters.ContainsKey("ComputeType")) {
     $ComputeType
 }
@@ -237,6 +252,21 @@ if ($resolvedMinFreeDiskSpaceMB -lt 0) {
     throw "MinFreeDiskSpaceMB must be zero (disabled) or a positive number."
 }
 
+# Port used to reach the persistent worker container (see "Persistent worker"
+# section below). Only needs to change if something else on this machine
+# already uses the default port.
+$resolvedWorkerPort = if ($PSBoundParameters.ContainsKey("WorkerPort")) {
+    $WorkerPort
+}
+else {
+    $v = Get-OptionValue -Options $fileOptions -Name "WorkerPort"
+    if ($null -ne $v -and [string]$v -match '^\d+$') { [int]$v } else { 8756 }
+}
+
+if ($resolvedWorkerPort -le 0 -or $resolvedWorkerPort -gt 65535) {
+    throw "WorkerPort must be a valid TCP port number (1-65535)."
+}
+
 if ([string]::IsNullOrWhiteSpace($resolvedModelsPath)) {
     throw "ModelsPath is required. Provide -ModelsPath or set ModelsPath in options.json."
 }
@@ -284,6 +314,165 @@ function Get-FreeSpaceBytes {
 }
 
 # ---------------------------------------------------------------------------
+# Persistent worker
+# ---------------------------------------------------------------------------
+#
+# Every VAD scan, language-probe clip, transcription, and translation used to
+# be its own `docker run --rm ...` invocation, each one reloading every model
+# (VAD, tiny probe, main transcription model, alignment model) from scratch -
+# measured at roughly 15-50 seconds of pure model-reload overhead per file,
+# out of typical total per-file times of 60-160 seconds. Instead, a single
+# long-lived container (server.py) is started once and reused across every
+# call in this run - and across future runs, since it's left running rather
+# than torn down at the end - keeping models resident in memory so only the
+# very first call of each kind pays the reload cost. Stop it manually with
+# `docker stop vidtranscribe-worker` (e.g. to free VRAM) when you're done for
+# a while; it will be started again automatically next time it's needed.
+
+$script:WorkerContainerName = "vidtranscribe-worker"
+
+function Get-WorkerScratchDir {
+    # Host-side scratch directory bind-mounted once into the persistent
+    # worker container at /work. Each request that needs to read or write a
+    # file (probe clips, transcription/translation output) uses a fresh
+    # subfolder under here, mirroring the isolation the old per-call
+    # `-v ...:/output` bind mounts gave for free, just now under one mount
+    # that's fixed for the container's whole lifetime.
+    $dir = Join-Path $env:TEMP "vidtranscribe_worker_work"
+    New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    return $dir
+}
+
+function New-WorkerScratchSubdir {
+    param([Parameter(Mandatory = $true)][string]$Prefix)
+
+    $workDir = Get-WorkerScratchDir
+    $leaf = "$Prefix`_$([guid]::NewGuid().ToString('N'))"
+    $hostPath = Join-Path $workDir $leaf
+    New-Item -ItemType Directory -Path $hostPath -Force | Out-Null
+    return [PSCustomObject]@{ HostPath = $hostPath; ContainerPath = "/work/$leaf" }
+}
+
+function ConvertTo-ContainerInputPath {
+    # The persistent worker mounts the whole scan root as /input:ro once at
+    # startup (rather than a fresh per-file bind mount), so any file under
+    # that root is reachable at /input/<name-relative-to-root>.
+    param(
+        [Parameter(Mandatory = $true)][string]$FileName
+    )
+    return "/input/$FileName"
+}
+
+function Test-WorkerHealth {
+    param([Parameter(Mandatory = $true)][int]$Port)
+    try {
+        return Invoke-RestMethod -Uri "http://127.0.0.1:$Port/health" -Method Get -TimeoutSec 5
+    }
+    catch {
+        return $null
+    }
+}
+
+function Start-VidtranscribeWorker {
+    # Idempotent: reuses an already-running, healthy worker (e.g. left
+    # running from a previous run, or from before an interrupted run) rather
+    # than starting a duplicate. Restarts it if it's running with a
+    # different model/translate_model/device/compute_type than requested
+    # (e.g. options.json changed since it was started), or if it's present
+    # but unhealthy.
+    param(
+        [Parameter(Mandatory = $true)][string]$ScriptRoot,
+        [Parameter(Mandatory = $true)][string]$RootPath,
+        [Parameter(Mandatory = $true)][string]$ModelsPath,
+        [Parameter(Mandatory = $true)][string]$DockerImage,
+        [Parameter(Mandatory = $true)][string]$Model,
+        [Parameter(Mandatory = $true)][string]$TranslateModel,
+        [Parameter(Mandatory = $true)][string]$Device,
+        [Parameter(Mandatory = $true)][string]$ComputeType,
+        [Parameter(Mandatory = $true)][int]$Port
+    )
+
+    $health = Test-WorkerHealth -Port $Port
+    if ($null -ne $health -and $health.model -eq $Model -and $health.translate_model -eq $TranslateModel -and $health.device -eq $Device -and $health.compute_type -eq $ComputeType) {
+        return
+    }
+
+    $existing = (& docker ps -a --filter "name=^/$($script:WorkerContainerName)$" --format "{{.ID}}" 2>$null)
+    if ($existing) {
+        if ($null -ne $health) {
+            Write-Host "Worker is running with a different configuration; restarting it."
+        }
+        & docker rm -f $script:WorkerContainerName 2>$null | Out-Null
+    }
+
+    Write-Host "Starting persistent worker (model=$Model, translate_model=$TranslateModel, device=$Device, compute_type=$ComputeType)..."
+    $workDir = Get-WorkerScratchDir
+
+    $runArgs = @(
+        'run', '-d', '--gpus', 'all',
+        '--name', $script:WorkerContainerName,
+        '-p', "127.0.0.1:${Port}:${Port}",
+        '-v', "${ScriptRoot}:/scripts:ro",
+        '-v', "${RootPath}:/input:ro",
+        '-v', "${ModelsPath}:/models",
+        '-v', "${workDir}:/work",
+        '--entrypoint', 'python',
+        $DockerImage,
+        '/scripts/server.py',
+        '--model', $Model,
+        '--translate_model', $TranslateModel,
+        '--device', $Device,
+        '--compute_type', $ComputeType,
+        '--port', $Port
+    )
+
+    & docker @runArgs | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to start the persistent worker container."
+    }
+
+    $deadline = (Get-Date).AddSeconds(90)
+    while ((Get-Date) -lt $deadline) {
+        Start-Sleep -Seconds 1
+        if ($null -ne (Test-WorkerHealth -Port $Port)) {
+            Write-Host "Worker is ready."
+            return
+        }
+    }
+
+    throw "Worker did not become healthy within 90 seconds. Check its logs with: docker logs $($script:WorkerContainerName)"
+}
+
+function Invoke-WorkerRequest {
+    param(
+        [Parameter(Mandatory = $true)][int]$Port,
+        [Parameter(Mandatory = $true)][string]$Endpoint,
+        [Parameter(Mandatory = $true)][hashtable]$Body,
+        [int]$TimeoutSec = 3600
+    )
+
+    try {
+        $json = $Body | ConvertTo-Json -Depth 10
+        return Invoke-RestMethod -Uri "http://127.0.0.1:$Port/$Endpoint" -Method Post -Body $json -ContentType "application/json" -TimeoutSec $TimeoutSec
+    }
+    catch {
+        $webResponse = $_.Exception.Response
+        if ($null -ne $webResponse) {
+            try {
+                $stream = $webResponse.GetResponseStream()
+                $reader = New-Object System.IO.StreamReader($stream)
+                $errBody = $reader.ReadToEnd() | ConvertFrom-Json
+                if ($null -ne $errBody.error) {
+                    throw "Worker request to $Endpoint failed: $($errBody.error)"
+                }
+            }
+            catch { }
+        }
+        throw "Worker request to $Endpoint failed: $($_.Exception.Message)"
+    }
+}
+
+# ---------------------------------------------------------------------------
 # Language probing
 # ---------------------------------------------------------------------------
 #
@@ -313,7 +502,7 @@ function Get-VideoDurationSeconds {
 
 function Get-VadSpeechSegments {
     # Runs WhisperX's own pyannote-based voice-activity detector (via the
-    # standalone vad_probe.py helper) directly against the whole file - much
+    # persistent worker's /vad endpoint) against the whole file - much
     # cheaper than a full transcription pass - and returns the speech segments
     # it finds as an array of @{ Start = <seconds>; End = <seconds> }. Used to
     # locate genuine speech-containing windows for language identification,
@@ -323,33 +512,16 @@ function Get-VadSpeechSegments {
     # Returns $null on any failure.
     param(
         [Parameter(Mandatory = $true)][string]$FilePath,
-        [Parameter(Mandatory = $true)][string]$ModelsPath,
-        [Parameter(Mandatory = $true)][string]$DockerImage,
-        [Parameter(Mandatory = $true)][string]$Device,
-        [Parameter(Mandatory = $true)][string]$ScriptRoot
+        [Parameter(Mandatory = $true)][int]$Port
     )
 
     try {
-        $videoDir = Split-Path -Parent $FilePath
         $fileName = Split-Path -Leaf $FilePath
+        $containerPath = ConvertTo-ContainerInputPath -FileName $fileName
 
-        $vadArgs = @(
-            'run', '--rm', '--gpus', 'all', '--entrypoint', 'python',
-            '-v', "${ScriptRoot}:/scripts:ro",
-            '-v', "${videoDir}:/input:ro",
-            '-v', "${ModelsPath}:/models",
-            $DockerImage,
-            '/scripts/vad_probe.py',
-            "/input/$fileName"
-        )
-
-        $stdout = & docker @vadArgs 2>$null
-        if ($LASTEXITCODE -ne 0 -or -not $stdout) { return $null }
-
-        $jsonLine = $stdout | Select-Object -Last 1
-        $parsed = $jsonLine | ConvertFrom-Json
-        if ($null -eq $parsed) { return $null }
-        return @($parsed | ForEach-Object { [PSCustomObject]@{ Start = [double]$_.start; End = [double]$_.end } })
+        $resp = Invoke-WorkerRequest -Port $Port -Endpoint "vad" -Body @{ file = $containerPath } -TimeoutSec 300
+        if ($null -eq $resp -or $null -eq $resp.segments) { return $null }
+        return @($resp.segments | ForEach-Object { [PSCustomObject]@{ Start = [double]$_.start; End = [double]$_.end } })
     }
     catch {
         return $null
@@ -390,69 +562,37 @@ function Select-SpeechClipWindow {
 
 function Get-LanguageForClip {
     # Extracts a short audio clip spanning $OffsetSeconds..($OffsetSeconds +
-    # $ClipSeconds) and runs a fast (tiny model, no alignment) WhisperX pass
-    # on it, reading the actually-detected language from its
-    # "Detected language: <code> (<confidence>)" log line rather than the
-    # output JSON's "language" field. WhisperX's own transcribe.py
-    # unconditionally overwrites that JSON field with "align_language" right
-    # before writing output - which defaults to "en" whenever --language
-    # isn't explicitly forced, regardless of what was actually detected - so
-    # the JSON field cannot be trusted for auto-detection. --log-level info
-    # surfaces that log line without --verbose True's per-segment transcript
-    # text (keeps dialogue content out of console/log output). Returns $null
-    # on any failure so callers can fall back gracefully.
+    # $ClipSeconds) and asks the persistent worker's /probe_language endpoint
+    # (fast tiny model, no alignment) to detect its language directly -
+    # returned as a structured JSON field rather than scraped from a log
+    # line, since the worker doesn't need to work around the CLI's "language"
+    # JSON field being unconditionally overwritten (see server.py). Returns
+    # $null on any failure so callers can fall back gracefully.
     param(
         [Parameter(Mandatory = $true)][string]$FilePath,
         [Parameter(Mandatory = $true)][double]$OffsetSeconds,
         [Parameter(Mandatory = $true)][double]$ClipSeconds,
-        [Parameter(Mandatory = $true)][string]$ModelsPath,
-        [Parameter(Mandatory = $true)][string]$DockerImage,
-        [Parameter(Mandatory = $true)][string]$Device,
-        [Parameter(Mandatory = $true)][string]$ComputeType
+        [Parameter(Mandatory = $true)][int]$Port
     )
 
-    $probeDir = $null
+    $scratch = $null
     try {
-        $probeDir = Join-Path $env:TEMP "vidtranscribe_probe_$([guid]::NewGuid().ToString('N'))"
-        $probeOutDir = Join-Path $probeDir "out"
-        New-Item -ItemType Directory -Path $probeOutDir -Force | Out-Null
-        $clipPath = Join-Path $probeDir "clip.wav"
+        $scratch = New-WorkerScratchSubdir -Prefix "probe"
+        $clipPath = Join-Path $scratch.HostPath "clip.wav"
 
         & ffmpeg -hide_banner -loglevel error -ss $OffsetSeconds -i $FilePath -t $ClipSeconds -vn -ar 16000 -ac 1 -f wav $clipPath 2>$null
         if (-not (Test-Path -LiteralPath $clipPath -PathType Leaf)) { return $null }
 
-        $probeDockerArgs = @(
-            'run', '--rm', '--gpus', 'all',
-            '-v', "${probeDir}:/input:ro",
-            '-v', "${probeOutDir}:/output",
-            '-v', "${ModelsPath}:/models",
-            $DockerImage,
-            '/input/clip.wav',
-            '--model', 'tiny',
-            '--device', $Device,
-            '--compute_type', $ComputeType,
-            '--no_align',
-            '--output_dir', '/output',
-            '--verbose', 'False',
-            '--log-level', 'info'
-        )
-
-        $probeOutput = & docker @probeDockerArgs 2>&1
-        if ($LASTEXITCODE -ne 0) { return $null }
-
-        foreach ($line in $probeOutput) {
-            if ($line -match 'Detected language:\s*(\w+)') {
-                return $Matches[1]
-            }
-        }
-        return $null
+        $resp = Invoke-WorkerRequest -Port $Port -Endpoint "probe_language" -Body @{ file = "$($scratch.ContainerPath)/clip.wav" } -TimeoutSec 120
+        if ($null -eq $resp -or [string]::IsNullOrWhiteSpace($resp.language)) { return $null }
+        return $resp.language
     }
     catch {
         return $null
     }
     finally {
-        if ($null -ne $probeDir -and (Test-Path -LiteralPath $probeDir)) {
-            Remove-Item -LiteralPath $probeDir -Recurse -Force -ErrorAction SilentlyContinue
+        if ($null -ne $scratch -and (Test-Path -LiteralPath $scratch.HostPath)) {
+            Remove-Item -LiteralPath $scratch.HostPath -Recurse -Force -ErrorAction SilentlyContinue
         }
     }
 }
@@ -473,11 +613,7 @@ function Get-ProbedLanguage {
     # normal full-file auto-detection.
     param(
         [Parameter(Mandatory = $true)][string]$FilePath,
-        [Parameter(Mandatory = $true)][string]$ModelsPath,
-        [Parameter(Mandatory = $true)][string]$DockerImage,
-        [Parameter(Mandatory = $true)][string]$Device,
-        [Parameter(Mandatory = $true)][string]$ComputeType,
-        [Parameter(Mandatory = $true)][string]$ScriptRoot,
+        [Parameter(Mandatory = $true)][int]$Port,
         [double]$ClipSeconds = 45
     )
 
@@ -486,7 +622,7 @@ function Get-ProbedLanguage {
         return $null
     }
 
-    $segments = Get-VadSpeechSegments -FilePath $FilePath -ModelsPath $ModelsPath -DockerImage $DockerImage -Device $Device -ScriptRoot $ScriptRoot
+    $segments = Get-VadSpeechSegments -FilePath $FilePath -Port $Port
     if ($null -eq $segments -or $segments.Count -eq 0) {
         Write-Host "No speech detected anywhere in the file via voice-activity detection; cannot probe language."
         return $null
@@ -502,7 +638,7 @@ function Get-ProbedLanguage {
     $samples = foreach ($range in $ranges) {
         $window = Select-SpeechClipWindow -Segments $segments -ClipSeconds $ClipSeconds -MinStart $range.MinStart -MaxEnd $range.MaxEnd
         if ($null -eq $window) { continue }
-        $lang = Get-LanguageForClip -FilePath $FilePath -OffsetSeconds $window.Start -ClipSeconds ($window.End - $window.Start) -ModelsPath $ModelsPath -DockerImage $DockerImage -Device $Device -ComputeType $ComputeType
+        $lang = Get-LanguageForClip -FilePath $FilePath -OffsetSeconds $window.Start -ClipSeconds ($window.End - $window.Start) -Port $Port
         if ($null -eq $lang) { continue }
         [pscustomobject]@{ Start = $window.Start; Language = $lang }
     }
@@ -690,10 +826,7 @@ function Invoke-LanguageRecheck {
     param(
         [Parameter(Mandatory = $true)][object[]]$VideoFiles,
         [Parameter(Mandatory = $true)][int]$MaxFiles,
-        [Parameter(Mandatory = $true)][string]$ModelsPath,
-        [Parameter(Mandatory = $true)][string]$DockerImage,
-        [Parameter(Mandatory = $true)][string]$Device,
-        [Parameter(Mandatory = $true)][string]$ComputeType,
+        [Parameter(Mandatory = $true)][int]$Port,
         [Parameter(Mandatory = $true)][int]$LanguageProbeVersion,
         [Parameter(Mandatory = $true)][bool]$Fix,
         [Parameter(Mandatory = $true)][bool]$IsDryRun,
@@ -788,7 +921,7 @@ function Invoke-LanguageRecheck {
             continue
         }
 
-        $probed = Get-ProbedLanguage -FilePath $c.File.FullName -ModelsPath $ModelsPath -DockerImage $DockerImage -Device $Device -ComputeType $ComputeType -ScriptRoot $scriptRoot
+        $probed = Get-ProbedLanguage -FilePath $c.File.FullName -Port $Port
 
         if ($null -eq $probed) {
             Write-Host "  Probe failed: $($c.File.FullName)"
@@ -848,7 +981,30 @@ if ($QuickScanNonLatin) {
 }
 
 if ($RecheckLanguage) {
-    $exitCode = Invoke-LanguageRecheck -VideoFiles $videoFiles -MaxFiles $resolvedMaxFiles -ModelsPath $resolvedModelsPath -DockerImage $resolvedDockerImage -Device $resolvedDevice -ComputeType $resolvedComputeType -LanguageProbeVersion $LanguageProbeVersion -Fix:$FixMismatches.IsPresent -IsDryRun:$DryRun.IsPresent -IsNoConfirm:$NoConfirm.IsPresent -Force:$ForceRecheck.IsPresent
+    if (-not $DryRun) {
+        try {
+            & docker version --format '{{.Server.Version}}' 2>$null | Out-Null
+            if ($LASTEXITCODE -ne 0) {
+                throw "Docker daemon not reachable."
+            }
+        }
+        catch {
+            Write-Host "Docker does not appear to be available. Is Docker Desktop running? ($($_.Exception.Message))"
+            exit 1
+        }
+
+        & docker image inspect $resolvedDockerImage 2>$null | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "Docker image not found: $resolvedDockerImage"
+            Write-Host "Build it first with build-vidtranscribe.ps1 in this folder."
+            exit 1
+        }
+
+        $workerRootPath = if ($pathItem.PSIsContainer) { $resolvedPath } else { $pathItem.DirectoryName }
+        Start-VidtranscribeWorker -ScriptRoot $scriptRoot -RootPath $workerRootPath -ModelsPath $resolvedModelsPath -DockerImage $resolvedDockerImage -Model $resolvedModel -TranslateModel $resolvedTranslateModel -Device $resolvedDevice -ComputeType $resolvedComputeType -Port $resolvedWorkerPort
+    }
+
+    $exitCode = Invoke-LanguageRecheck -VideoFiles $videoFiles -MaxFiles $resolvedMaxFiles -Port $resolvedWorkerPort -LanguageProbeVersion $LanguageProbeVersion -Fix:$FixMismatches.IsPresent -IsDryRun:$DryRun.IsPresent -IsNoConfirm:$NoConfirm.IsPresent -Force:$ForceRecheck.IsPresent
     exit $exitCode
 }
 
@@ -990,6 +1146,16 @@ if ($LASTEXITCODE -ne 0) {
 
 New-Item -ItemType Directory -Path $resolvedModelsPath -Force | Out-Null
 
+$workerRootPath = if ($pathItem.PSIsContainer) { $resolvedPath } else { $pathItem.DirectoryName }
+try {
+    Start-VidtranscribeWorker -ScriptRoot $scriptRoot -RootPath $workerRootPath -ModelsPath $resolvedModelsPath -DockerImage $resolvedDockerImage -Model $resolvedModel -TranslateModel $resolvedTranslateModel -Device $resolvedDevice -ComputeType $resolvedComputeType -Port $resolvedWorkerPort
+}
+catch {
+    Write-Host "Could not start the persistent worker: $($_.Exception.Message)"
+    Write-Host "SUMMARY|tool=vidtranscribe|status=aborted|dry_run=false|total=$total|to_process=$($toProcess.Count)|skipped=$skipped|processed=0|translated_only=0|failed=0"
+    exit 1
+}
+
 $processed = 0
 $translatedOnlyCount = 0
 $failed = 0
@@ -1035,7 +1201,7 @@ foreach ($item in $toProcess) {
         $languageForRun = $resolvedLanguage
         if ([string]::IsNullOrWhiteSpace($languageForRun)) {
             Write-Host "Probing language via voice-activity detection to find genuine speech..."
-            $probedLanguage = Get-ProbedLanguage -FilePath $file.FullName -ModelsPath $resolvedModelsPath -DockerImage $resolvedDockerImage -Device $resolvedDevice -ComputeType $resolvedComputeType -ScriptRoot $scriptRoot
+            $probedLanguage = Get-ProbedLanguage -FilePath $file.FullName -Port $resolvedWorkerPort
             if ($null -ne $probedLanguage) {
                 Write-Host "Probed language: $probedLanguage"
                 $languageForRun = $probedLanguage
@@ -1045,50 +1211,32 @@ foreach ($item in $toProcess) {
             }
         }
 
-        $tempOutDir = Join-Path $env:TEMP "vidtranscribe_$([guid]::NewGuid().ToString('N'))"
-        New-Item -ItemType Directory -Path $tempOutDir -Force | Out-Null
+        $tempOutDir = New-WorkerScratchSubdir -Prefix "transcribe"
 
         try {
-            $dockerArgs = @(
-                'run', '--rm', '--gpus', 'all',
-                '-v', "${videoDir}:/input:ro",
-                '-v', "${tempOutDir}:/output",
-                '-v', "${resolvedModelsPath}:/models"
-            )
-            if (-not [string]::IsNullOrWhiteSpace($env:HF_TOKEN)) {
-                $dockerArgs += @('-e', "HF_TOKEN=$($env:HF_TOKEN)")
+            $inputContainerPath = ConvertTo-ContainerInputPath -FileName $file.Name
+            $requestBody = @{
+                file       = $inputContainerPath
+                output_dir = $tempOutDir.ContainerPath
             }
-            $dockerArgs += @(
-                $resolvedDockerImage,
-                "/input/$($file.Name)",
-                '--model', $resolvedModel,
-                '--device', $resolvedDevice,
-                '--compute_type', $resolvedComputeType,
-                '--output_dir', '/output',
-                '--verbose', 'False',
-                '--log-level', 'info'
-            )
             if (-not [string]::IsNullOrWhiteSpace($languageForRun)) {
-                $dockerArgs += @('--language', $languageForRun)
+                $requestBody.language = $languageForRun
             }
 
-            $previousErrorActionPreference = $ErrorActionPreference
-            $ErrorActionPreference = 'Continue'
-            $dockerOutputLines = [System.Collections.Generic.List[string]]::new()
+            $workerFailed = $false
+            $workerDetectedLanguage = $null
             try {
-                & docker @dockerArgs 2>&1 | ForEach-Object { Write-Host $_; $dockerOutputLines.Add([string]$_) }
+                $response = Invoke-WorkerRequest -Port $resolvedWorkerPort -Endpoint "transcribe" -Body $requestBody
+                $workerDetectedLanguage = $response.detected_language
             }
-            finally {
-                $ErrorActionPreference = $previousErrorActionPreference
+            catch {
+                Write-Host "Transcription failed for $($file.FullName): $($_.Exception.Message)"
+                $workerFailed = $true
             }
-            $exitCode = $LASTEXITCODE
 
-            if ($exitCode -ne 0) {
-                Write-Host "Transcription failed for $($file.FullName) (docker exit code $exitCode)."
-            }
-            else {
-                $jsonTemp = Join-Path $tempOutDir "$baseName.json"
-                $srtTemp = Join-Path $tempOutDir "$baseName.srt"
+            if (-not $workerFailed) {
+                $jsonTemp = Join-Path $tempOutDir.HostPath "$baseName.json"
+                $srtTemp = Join-Path $tempOutDir.HostPath "$baseName.srt"
 
                 if (-not (Test-Path -LiteralPath $jsonTemp -PathType Leaf) -or -not (Test-Path -LiteralPath $srtTemp -PathType Leaf)) {
                     Write-Host "Expected output files not found for $($file.FullName)."
@@ -1096,29 +1244,14 @@ foreach ($item in $toProcess) {
                 else {
                     $jsonObj = Get-Content -LiteralPath $jsonTemp -Raw | ConvertFrom-Json
 
-                    # WhisperX's transcribe.py unconditionally overwrites the output
-                    # JSON's "language" field with its internal "align_language"
-                    # value right before writing - which defaults to "en" whenever
-                    # --language wasn't explicitly passed, regardless of what was
-                    # actually detected. So when no language was forced, the true
-                    # detected language is only recoverable from the "Detected
-                    # language: <code> (<confidence>)" log line (unaffected by
-                    # --verbose) rather than the JSON field.
-                    $loggedLanguage = $null
-                    if ([string]::IsNullOrWhiteSpace($languageForRun)) {
-                        foreach ($line in $dockerOutputLines) {
-                            if ($line -match 'Detected language:\s*(\w+)') {
-                                $loggedLanguage = $Matches[1]
-                                break
-                            }
-                        }
-                    }
-
+                    # The worker captures the true detected language (result["language"]
+                    # from whisperx's own transcribe() call) before any writer-time
+                    # overwrite, and returns it directly - no log-scraping needed.
                     $detectedLanguage = if (-not [string]::IsNullOrWhiteSpace($languageForRun)) {
                         $languageForRun
                     }
-                    elseif (-not [string]::IsNullOrWhiteSpace($loggedLanguage)) {
-                        $loggedLanguage
+                    elseif (-not [string]::IsNullOrWhiteSpace([string]$workerDetectedLanguage)) {
+                        [string]$workerDetectedLanguage
                     }
                     elseif ($null -ne $jsonObj.language -and -not [string]::IsNullOrWhiteSpace([string]$jsonObj.language)) {
                         [string]$jsonObj.language
@@ -1134,14 +1267,11 @@ foreach ($item in $toProcess) {
                         Write-Host "Destination already exists, not overwriting: $destSrt / $destJson"
                     }
                     else {
-                        # WhisperX's own output JSON has its "language" field
-                        # unconditionally overwritten to its "en" default whenever
-                        # no --language was forced (see comment above). Correct it
-                        # here so the sidecar we keep long-term reflects the real
-                        # detected language, not that artifact. Also stamp the
-                        # probe-logic version so a future -RecheckLanguage run can
-                        # tell this file was already produced/verified under the
-                        # current logic and skip re-probing it.
+                        # Stamp the true detected language (in case it differs from
+                        # the JSON's own "language" field) and the probe-logic
+                        # version so a future -RecheckLanguage run can tell this
+                        # file was already produced/verified under the current
+                        # logic and skip re-probing it.
                         $jsonObj | Add-Member -NotePropertyName 'language' -NotePropertyValue $detectedLanguage -Force
                         $jsonObj | Add-Member -NotePropertyName 'vidtranscribe_probe_version' -NotePropertyValue $LanguageProbeVersion -Force
                         ($jsonObj | ConvertTo-Json -Depth 20) | Set-Content -LiteralPath $jsonTemp -NoNewline
@@ -1164,7 +1294,7 @@ foreach ($item in $toProcess) {
             }
         }
         finally {
-            Remove-Item -LiteralPath $tempOutDir -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $tempOutDir.HostPath -Recurse -Force -ErrorAction SilentlyContinue
         }
     }
 
@@ -1177,46 +1307,25 @@ foreach ($item in $toProcess) {
         else {
             Write-Host "PROGRESS|tool=vidtranscribe|event=translate_start|index=$index|total=$($toProcess.Count)|file=$safeName|source_language=$detectedLanguage"
 
-            $tempTranslateDir = Join-Path $env:TEMP "vidtranscribe_translate_$([guid]::NewGuid().ToString('N'))"
-            New-Item -ItemType Directory -Path $tempTranslateDir -Force | Out-Null
+            $tempTranslateDir = New-WorkerScratchSubdir -Prefix "translate"
 
             try {
-                $translateArgs = @(
-                    'run', '--rm', '--gpus', 'all',
-                    '-v', "${videoDir}:/input:ro",
-                    '-v', "${tempTranslateDir}:/output",
-                    '-v', "${resolvedModelsPath}:/models"
-                )
-                if (-not [string]::IsNullOrWhiteSpace($env:HF_TOKEN)) {
-                    $translateArgs += @('-e', "HF_TOKEN=$($env:HF_TOKEN)")
-                }
-                $translateArgs += @(
-                    $resolvedDockerImage,
-                    "/input/$($file.Name)",
-                    '--task', 'translate',
-                    '--language', $detectedLanguage,
-                    '--model', $resolvedModel,
-                    '--device', $resolvedDevice,
-                    '--compute_type', $resolvedComputeType,
-                    '--output_dir', '/output',
-                    '--verbose', 'False'
-                )
-
-                $previousErrorActionPreference = $ErrorActionPreference
-                $ErrorActionPreference = 'Continue'
+                $inputContainerPath = ConvertTo-ContainerInputPath -FileName $file.Name
+                $translateFailed = $false
                 try {
-                    & docker @translateArgs 2>&1 | ForEach-Object { Write-Host $_ }
+                    Invoke-WorkerRequest -Port $resolvedWorkerPort -Endpoint "translate" -Body @{
+                        file             = $inputContainerPath
+                        source_language  = $detectedLanguage
+                        output_dir       = $tempTranslateDir.ContainerPath
+                    } | Out-Null
                 }
-                finally {
-                    $ErrorActionPreference = $previousErrorActionPreference
+                catch {
+                    Write-Host "Translation to English failed for $($file.FullName): $($_.Exception.Message)"
+                    $translateFailed = $true
                 }
-                $translateExitCode = $LASTEXITCODE
 
-                if ($translateExitCode -ne 0) {
-                    Write-Host "Translation to English failed for $($file.FullName) (docker exit code $translateExitCode)."
-                }
-                else {
-                    $srtTranslateTemp = Join-Path $tempTranslateDir "$baseName.srt"
+                if (-not $translateFailed) {
+                    $srtTranslateTemp = Join-Path $tempTranslateDir.HostPath "$baseName.srt"
 
                     if (-not (Test-Path -LiteralPath $srtTranslateTemp -PathType Leaf)) {
                         Write-Host "Expected translated subtitle not found for $($file.FullName)."
@@ -1234,7 +1343,7 @@ foreach ($item in $toProcess) {
                 Write-Host "Error translating $($file.FullName) to English: $($_.Exception.Message)"
             }
             finally {
-                Remove-Item -LiteralPath $tempTranslateDir -Recurse -Force -ErrorAction SilentlyContinue
+                Remove-Item -LiteralPath $tempTranslateDir.HostPath -Recurse -Force -ErrorAction SilentlyContinue
             }
         }
     }

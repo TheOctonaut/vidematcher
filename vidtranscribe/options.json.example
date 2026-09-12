@@ -2,9 +2,11 @@
   "ModelsPath": "C:/server/vidtranscribe/models",
   "DockerImage": "vidtranscribe:latest",
   "Model": "turbo",
+  "TranslateModel": "large-v3",
   "ComputeType": "float16",
   "Device": "cuda",
   "MaxFiles": 0,
   "AutoTranslate": true,
-  "MinFreeDiskSpaceMB": 50
+  "MinFreeDiskSpaceMB": 50,
+  "WorkerPort": 8756
 }
