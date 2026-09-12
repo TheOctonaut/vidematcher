@@ -45,6 +45,9 @@ param(
     [string[]]$StudioAllowlist,
 
     [Parameter(Mandatory = $false)]
+    [int]$MinFreeDiskSpaceMB,
+
+    [Parameter(Mandatory = $false)]
     [switch]$DryRun,
 
     [Parameter(Mandatory = $false)]
@@ -217,6 +220,23 @@ else {
     if ($null -ne $v) { [bool]$v } else { $true }
 }
 
+# Guards against a scenario seen in practice: the destination drive fills up
+# partway through a long unattended batch, and every remaining file still
+# burns several minutes of GPU time (VAD probe + transcription + alignment)
+# only to fail at the final save step. Checked before each file starts (cheap)
+# so a low-space condition stops the run before wasting compute, not after.
+$resolvedMinFreeDiskSpaceMB = if ($PSBoundParameters.ContainsKey("MinFreeDiskSpaceMB")) {
+    $MinFreeDiskSpaceMB
+}
+else {
+    $v = Get-OptionValue -Options $fileOptions -Name "MinFreeDiskSpaceMB"
+    if ($null -ne $v -and [string]$v -match '^\d+$') { [int]$v } else { 50 }
+}
+
+if ($resolvedMinFreeDiskSpaceMB -lt 0) {
+    throw "MinFreeDiskSpaceMB must be zero (disabled) or a positive number."
+}
+
 if ([string]::IsNullOrWhiteSpace($resolvedModelsPath)) {
     throw "ModelsPath is required. Provide -ModelsPath or set ModelsPath in options.json."
 }
@@ -243,6 +263,24 @@ if ($videoFiles.Count -eq 0) {
     Write-Host "No .mp4 files found at: $resolvedPath"
     Write-Host "SUMMARY|tool=vidtranscribe|status=noop|dry_run=$($DryRun.IsPresent.ToString().ToLowerInvariant())|total=0|to_process=0|skipped=0|processed=0|translated_only=0|failed=0"
     exit 0
+}
+
+function Get-FreeSpaceBytes {
+    # Returns the free space (bytes) on the drive containing $Path, or $null
+    # if it can't be determined (e.g. a UNC path with no drive letter). Used
+    # to bail out of a long unattended batch before the destination drive
+    # fills up, rather than discovering it only after burning GPU time on a
+    # transcription that then fails to save.
+    param([Parameter(Mandatory = $true)][string]$Path)
+    try {
+        $qualifier = (Split-Path -Qualifier $Path -ErrorAction Stop).TrimEnd(':')
+        if ([string]::IsNullOrWhiteSpace($qualifier)) { return $null }
+        $psDrive = Get-PSDrive -Name $qualifier -ErrorAction Stop
+        return [long]$psDrive.Free
+    }
+    catch {
+        return $null
+    }
 }
 
 # ---------------------------------------------------------------------------
@@ -956,6 +994,7 @@ $processed = 0
 $translatedOnlyCount = 0
 $failed = 0
 $index = 0
+$diskSpaceAborted = $false
 
 foreach ($item in $toProcess) {
     $index++
@@ -963,6 +1002,17 @@ foreach ($item in $toProcess) {
     $baseName = [System.IO.Path]::GetFileNameWithoutExtension($file.Name)
     $videoDir = $file.DirectoryName
     $safeName = ConvertTo-ProgressValue $file.Name
+
+    if ($resolvedMinFreeDiskSpaceMB -gt 0) {
+        $freeBytes = Get-FreeSpaceBytes -Path $videoDir
+        if ($null -ne $freeBytes -and $freeBytes -lt ($resolvedMinFreeDiskSpaceMB * 1MB)) {
+            $freeMB = [math]::Round($freeBytes / 1MB, 1)
+            Write-Host ""
+            Write-Host "Stopping: only $freeMB MB free on $videoDir (below the $resolvedMinFreeDiskSpaceMB MB minimum). $($toProcess.Count - $index + 1) file(s) not attempted."
+            $diskSpaceAborted = $true
+            break
+        }
+    }
 
     Write-Host ""
 
@@ -1104,6 +1154,14 @@ foreach ($item in $toProcess) {
         }
         catch {
             Write-Host "Error processing $($file.FullName): $($_.Exception.Message)"
+            if ($_.Exception.Message -match 'not enough space') {
+                # Backstop for the preflight free-space check above: if a
+                # write still fails with a disk-full error (e.g. space ran
+                # out between the check and the write, or the drive can't
+                # be queried), stop the whole run rather than continuing to
+                # burn GPU time on files that likely can't be saved either.
+                $diskSpaceAborted = $true
+            }
         }
         finally {
             Remove-Item -LiteralPath $tempOutDir -Recurse -Force -ErrorAction SilentlyContinue
@@ -1197,15 +1255,20 @@ foreach ($item in $toProcess) {
         $failed++
         Write-Host "PROGRESS|tool=vidtranscribe|event=complete|index=$index|total=$($toProcess.Count)|file=$safeName|elapsed_seconds=$elapsedSeconds|failed=true"
     }
+
+    if ($diskSpaceAborted) {
+        Write-Host "Stopping after a disk-space error: $($toProcess.Count - $index) file(s) not attempted."
+        break
+    }
 }
 
-$status = if ($failed -gt 0) { "failed" } else { "ok" }
+$status = if ($diskSpaceAborted) { "aborted" } elseif ($failed -gt 0) { "failed" } else { "ok" }
 
 Write-Host ""
 Write-Host "Done."
-Write-Host "SUMMARY|tool=vidtranscribe|status=$status|dry_run=false|total=$total|to_process=$($toProcess.Count)|skipped=$skipped|processed=$processed|translated_only=$translatedOnlyCount|failed=$failed"
+Write-Host "SUMMARY|tool=vidtranscribe|status=$status|dry_run=false|total=$total|to_process=$($toProcess.Count)|skipped=$skipped|processed=$processed|translated_only=$translatedOnlyCount|failed=$failed|disk_space_aborted=$($diskSpaceAborted.ToString().ToLowerInvariant())"
 
-if ($status -eq "failed") {
+if ($status -eq "failed" -or $status -eq "aborted") {
     exit 1
 }
 

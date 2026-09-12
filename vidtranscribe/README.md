@@ -72,8 +72,11 @@ CLI arguments override `options.json`, which overrides script defaults. `ModelsP
 | `Language` | `-Language` | *(auto-detect)* | ISO 639-1 code (e.g. `en`, `fr`). Forces language instead of auto-detecting. |
 | `MaxFiles` | `-MaxFiles` | `0` (no limit) | In directory mode, caps how many eligible files are processed in one run. Files beyond the limit are left for a subsequent run. Has no effect on a single-file `-Path`. |
 | `AutoTranslate` | `-NoTranslate` (to disable) | `true` | When the detected/forced source language isn't English, also runs WhisperX's built-in `--task translate` and writes an additional `Movie.en.srt`. Set `"AutoTranslate": false` in `options.json`, or pass `-NoTranslate`, to skip this. |
+| `MinFreeDiskSpaceMB` | `-MinFreeDiskSpaceMB` | `50` | Checked before each file: if the destination drive has less than this much free space, the run stops immediately (no more files attempted) instead of continuing to burn GPU time on transcriptions that would just fail to save. Set to `0` to disable. |
 
 `-OptionsFile` selects an alternate options file. `-DryRun` previews without transcribing. `-NoConfirm` skips the confirmation prompt (for automation).
+
+The free-space check runs once per file (cheap - just reads the drive's reported free space), immediately before the VAD probe/transcription starts, and again treats any actual "not enough space on the disk" write failure as a hard stop, in case space runs out between the check and the write. Either trigger stops the whole batch (not just that file) and reports `status=aborted` with `disk_space_aborted=true` in the final `SUMMARY|...` line, so an unattended overnight run doesn't spend hours transcribing files it can never save once the destination drive is nearly full.
 
 ## Output files
 

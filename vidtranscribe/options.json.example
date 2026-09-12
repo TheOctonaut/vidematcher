@@ -5,5 +5,6 @@
   "ComputeType": "float16",
   "Device": "cuda",
   "MaxFiles": 0,
-  "AutoTranslate": true
+  "AutoTranslate": true,
+  "MinFreeDiskSpaceMB": 50
 }
