@@ -527,18 +527,18 @@ $tPathBrowseFile.Add_Click({
 })
 $tabTranscribe.Controls.Add($tPathBrowseFile)
 
-$tStatusGauge = New-StatusGauge -Parent $tabTranscribe -X 828 -Y 8 -Size 64
-
 $tStatusButton = New-Object System.Windows.Forms.Button
 $tStatusButton.Text = "Check Status"
-$tStatusButton.Location = New-Object System.Drawing.Point(700, 16)
-$tStatusButton.Size = New-Object System.Drawing.Size(120, 28)
+$tStatusButton.Location = New-Object System.Drawing.Point(700, 124)
+$tStatusButton.Size = New-Object System.Drawing.Size(110, 28)
 $tabTranscribe.Controls.Add($tStatusButton)
+
+$tStatusGauge = New-StatusGauge -Parent $tabTranscribe -X 820 -Y 116 -Size 56
 
 $tStatusLabel = New-Object System.Windows.Forms.Label
 $tStatusLabel.Text = "Not checked"
-$tStatusLabel.Location = New-Object System.Drawing.Point(700, 50)
-$tStatusLabel.Size = New-Object System.Drawing.Size(120, 44)
+$tStatusLabel.Location = New-Object System.Drawing.Point(700, 156)
+$tStatusLabel.Size = New-Object System.Drawing.Size(180, 40)
 $tStatusLabel.ForeColor = [System.Drawing.Color]::DimGray
 $tabTranscribe.Controls.Add($tStatusLabel)
 
