@@ -578,56 +578,66 @@ $tStatusButton.Add_Click({
     }
 })
 
+$tToolTip = New-Object System.Windows.Forms.ToolTip
+$tToolTip.AutoPopDelay = 15000
+$tToolTip.InitialDelay = 400
+$tToolTip.ReshowDelay = 200
+
 $tLanguageLabel = New-Object System.Windows.Forms.Label
-$tLanguageLabel.Text = "Language (blank = auto-detect)"
+$tLanguageLabel.Text = "Language"
 $tLanguageLabel.Location = New-Object System.Drawing.Point(16, 76)
 $tLanguageLabel.AutoSize = $true
 $tabTranscribe.Controls.Add($tLanguageLabel)
 
 $tLanguageText = New-Object System.Windows.Forms.TextBox
 $tLanguageText.Location = New-Object System.Drawing.Point(16, 98)
-$tLanguageText.Size = New-Object System.Drawing.Size(120, 24)
+$tLanguageText.Size = New-Object System.Drawing.Size(90, 24)
 $tabTranscribe.Controls.Add($tLanguageText)
+$tToolTip.SetToolTip($tLanguageText, "ISO 639-1 code, e.g. en, fr, ja. Leave blank to auto-detect via voice-activity probing.")
 
 $tModelLabel = New-Object System.Windows.Forms.Label
 $tModelLabel.Text = "Model"
-$tModelLabel.Location = New-Object System.Drawing.Point(160, 76)
+$tModelLabel.Location = New-Object System.Drawing.Point(118, 76)
 $tModelLabel.AutoSize = $true
 $tabTranscribe.Controls.Add($tModelLabel)
 
-$tModelText = New-Object System.Windows.Forms.TextBox
-$tModelText.Location = New-Object System.Drawing.Point(160, 98)
-$tModelText.Size = New-Object System.Drawing.Size(120, 24)
+$tModelText = New-Object System.Windows.Forms.ComboBox
+$tModelText.Location = New-Object System.Drawing.Point(118, 98)
+$tModelText.Size = New-Object System.Drawing.Size(110, 24)
+$tModelText.Items.AddRange(@("turbo", "large-v3", "large-v2", "medium", "small", "base", "tiny"))
 $tModelText.Text = "turbo"
 if ($null -ne $vidtranscribeDefaults -and $vidtranscribeDefaults.PSObject.Properties.Name -contains "Model") {
     $tModelText.Text = [string]$vidtranscribeDefaults.Model
 }
 $tabTranscribe.Controls.Add($tModelText)
+$tToolTip.SetToolTip($tModelText, "Whisper model used to transcribe. Smaller = faster/less accurate; 'turbo' (default) is a fast large-v3 distillation good for transcription. You can type a custom model name too.")
 
 $tComputeLabel = New-Object System.Windows.Forms.Label
 $tComputeLabel.Text = "Compute Type"
-$tComputeLabel.Location = New-Object System.Drawing.Point(304, 76)
+$tComputeLabel.Location = New-Object System.Drawing.Point(240, 76)
 $tComputeLabel.AutoSize = $true
 $tabTranscribe.Controls.Add($tComputeLabel)
 
-$tComputeText = New-Object System.Windows.Forms.TextBox
-$tComputeText.Location = New-Object System.Drawing.Point(304, 98)
-$tComputeText.Size = New-Object System.Drawing.Size(120, 24)
+$tComputeText = New-Object System.Windows.Forms.ComboBox
+$tComputeText.Location = New-Object System.Drawing.Point(240, 98)
+$tComputeText.Size = New-Object System.Drawing.Size(110, 24)
+$tComputeText.Items.AddRange(@("float16", "float32", "int8", "int8_float16", "int8_float32"))
 $tComputeText.Text = "float16"
 if ($null -ne $vidtranscribeDefaults -and $vidtranscribeDefaults.PSObject.Properties.Name -contains "ComputeType") {
     $tComputeText.Text = [string]$vidtranscribeDefaults.ComputeType
 }
 $tabTranscribe.Controls.Add($tComputeText)
+$tToolTip.SetToolTip($tComputeText, "Numeric precision the GPU/CPU model runs at. float16 = default GPU precision (fast, accurate). int8* = smaller/faster but slightly less accurate. float32 = full precision, needed for CPU.")
 
 $tDeviceLabel = New-Object System.Windows.Forms.Label
 $tDeviceLabel.Text = "Device"
-$tDeviceLabel.Location = New-Object System.Drawing.Point(448, 76)
+$tDeviceLabel.Location = New-Object System.Drawing.Point(362, 76)
 $tDeviceLabel.AutoSize = $true
 $tabTranscribe.Controls.Add($tDeviceLabel)
 
 $tDeviceCombo = New-Object System.Windows.Forms.ComboBox
-$tDeviceCombo.Location = New-Object System.Drawing.Point(448, 98)
-$tDeviceCombo.Size = New-Object System.Drawing.Size(100, 24)
+$tDeviceCombo.Location = New-Object System.Drawing.Point(362, 98)
+$tDeviceCombo.Size = New-Object System.Drawing.Size(90, 24)
 $tDeviceCombo.Items.AddRange(@("cuda", "cpu"))
 $tDeviceCombo.Text = "cuda"
 if ($null -ne $vidtranscribeDefaults -and $vidtranscribeDefaults.PSObject.Properties.Name -contains "Device") {
@@ -635,15 +645,32 @@ if ($null -ne $vidtranscribeDefaults -and $vidtranscribeDefaults.PSObject.Proper
 }
 $tabTranscribe.Controls.Add($tDeviceCombo)
 
+$tTranslateModelLabel = New-Object System.Windows.Forms.Label
+$tTranslateModelLabel.Text = "Translate Model"
+$tTranslateModelLabel.Location = New-Object System.Drawing.Point(464, 76)
+$tTranslateModelLabel.AutoSize = $true
+$tabTranscribe.Controls.Add($tTranslateModelLabel)
+
+$tTranslateModelText = New-Object System.Windows.Forms.ComboBox
+$tTranslateModelText.Location = New-Object System.Drawing.Point(464, 98)
+$tTranslateModelText.Size = New-Object System.Drawing.Size(130, 24)
+$tTranslateModelText.Items.AddRange(@("large-v3", "large-v2", "medium"))
+$tTranslateModelText.Text = "large-v3"
+if ($null -ne $vidtranscribeDefaults -and $vidtranscribeDefaults.PSObject.Properties.Name -contains "TranslateModel") {
+    $tTranslateModelText.Text = [string]$vidtranscribeDefaults.TranslateModel
+}
+$tabTranscribe.Controls.Add($tTranslateModelText)
+$tToolTip.SetToolTip($tTranslateModelText, "Separate model used only for non-English -> English translation. 'turbo' is deliberately excluded here: its pruned decoder gives poor translation quality, so large-v3 (default) or large-v2 is used instead.")
+
 $tMaxFilesLabel = New-Object System.Windows.Forms.Label
-$tMaxFilesLabel.Text = "Max Files (0 = unlimited)"
-$tMaxFilesLabel.Location = New-Object System.Drawing.Point(568, 76)
+$tMaxFilesLabel.Text = "Max Files"
+$tMaxFilesLabel.Location = New-Object System.Drawing.Point(606, 76)
 $tMaxFilesLabel.AutoSize = $true
 $tabTranscribe.Controls.Add($tMaxFilesLabel)
 
 $tMaxFilesUpDown = New-Object System.Windows.Forms.NumericUpDown
-$tMaxFilesUpDown.Location = New-Object System.Drawing.Point(568, 98)
-$tMaxFilesUpDown.Size = New-Object System.Drawing.Size(90, 24)
+$tMaxFilesUpDown.Location = New-Object System.Drawing.Point(606, 98)
+$tMaxFilesUpDown.Size = New-Object System.Drawing.Size(80, 24)
 $tMaxFilesUpDown.Minimum = 0
 $tMaxFilesUpDown.Maximum = 100000
 $tMaxFilesUpDown.Value = 0
@@ -655,6 +682,7 @@ if ($null -ne $vidtranscribeDefaults -and $vidtranscribeDefaults.PSObject.Proper
     catch { }
 }
 $tabTranscribe.Controls.Add($tMaxFilesUpDown)
+$tToolTip.SetToolTip($tMaxFilesUpDown, "0 = unlimited (process every eligible file found).")
 
 $tNoTranslateCheck = New-Object System.Windows.Forms.CheckBox
 $tNoTranslateCheck.Text = "Disable auto-translate to English"
@@ -670,21 +698,6 @@ $tDryRunCheck.Text = "Dry Run (preview only)"
 $tDryRunCheck.Location = New-Object System.Drawing.Point(16, 165)
 $tDryRunCheck.AutoSize = $true
 $tabTranscribe.Controls.Add($tDryRunCheck)
-
-$tTranslateModelLabel = New-Object System.Windows.Forms.Label
-$tTranslateModelLabel.Text = "Translate Model"
-$tTranslateModelLabel.Location = New-Object System.Drawing.Point(160, 143)
-$tTranslateModelLabel.AutoSize = $true
-$tabTranscribe.Controls.Add($tTranslateModelLabel)
-
-$tTranslateModelText = New-Object System.Windows.Forms.TextBox
-$tTranslateModelText.Location = New-Object System.Drawing.Point(160, 165)
-$tTranslateModelText.Size = New-Object System.Drawing.Size(160, 24)
-$tTranslateModelText.Text = "large-v3"
-if ($null -ne $vidtranscribeDefaults -and $vidtranscribeDefaults.PSObject.Properties.Name -contains "TranslateModel") {
-    $tTranslateModelText.Text = [string]$vidtranscribeDefaults.TranslateModel
-}
-$tabTranscribe.Controls.Add($tTranslateModelText)
 
 $tNoteLabel = New-Object System.Windows.Forms.Label
 $tNoteLabel.Text = "ModelsPath / DockerImage / WorkerPort are read from vidtranscribe\options.json (not exposed here)."
@@ -735,18 +748,18 @@ $gScanBrowse.Add_Click({
 })
 $tabTag.Controls.Add($gScanBrowse)
 
-$gStatusGauge = New-StatusGauge -Parent $tabTag -X 828 -Y 8 -Size 64
-
 $gStatusButton = New-Object System.Windows.Forms.Button
 $gStatusButton.Text = "Check Status"
-$gStatusButton.Location = New-Object System.Drawing.Point(700, 16)
+$gStatusButton.Location = New-Object System.Drawing.Point(700, 76)
 $gStatusButton.Size = New-Object System.Drawing.Size(120, 28)
 $tabTag.Controls.Add($gStatusButton)
 
+$gStatusGauge = New-StatusGauge -Parent $tabTag -X 820 -Y 70 -Size 56
+
 $gStatusLabel = New-Object System.Windows.Forms.Label
 $gStatusLabel.Text = "Not checked"
-$gStatusLabel.Location = New-Object System.Drawing.Point(700, 50)
-$gStatusLabel.Size = New-Object System.Drawing.Size(120, 44)
+$gStatusLabel.Location = New-Object System.Drawing.Point(700, 106)
+$gStatusLabel.Size = New-Object System.Drawing.Size(176, 28)
 $gStatusLabel.ForeColor = [System.Drawing.Color]::DimGray
 $tabTag.Controls.Add($gStatusLabel)
 
