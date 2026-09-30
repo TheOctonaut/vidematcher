@@ -27,6 +27,9 @@ param(
     [string]$PresetName,
 
     [Parameter(Mandatory = $false)]
+    [string]$PresetImportFile,
+
+    [Parameter(Mandatory = $false)]
     [string]$HandBrakeCliPath,
 
     [Parameter(Mandatory = $false)]
@@ -775,6 +778,12 @@ $resolvedHandBrakeCliPath = if ($PSBoundParameters.ContainsKey("HandBrakeCliPath
     Normalize-OptionalString (Get-OptionValue -Options $fileOptions -Name "HandBrakeCliPath")
 }
 
+$resolvedPresetImportFile = if ($PSBoundParameters.ContainsKey("PresetImportFile")) {
+    Normalize-OptionalString $PresetImportFile
+} else {
+    Normalize-OptionalString (Get-OptionValue -Options $fileOptions -Name "PresetImportFile")
+}
+
 # Default tool script paths: siblings of the dispatcher's parent folder
 $repoRoot = Split-Path -Parent $scriptRoot
 
@@ -891,16 +900,22 @@ $dispatchPendingMoved = 0
 # PREFLIGHT: validate encode command shape before any destructive steps
 # ---------------------------------------------------------------------------
 
-$preflightArgs = @(
+$preflightArgs = [System.Collections.Generic.List[string]]@(
     "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
     (Escape-Argument -Value $resolvedVidencodeScript),
     "-SourceDir", (Escape-Argument -Value $resolvedHandbrakeDir),
     "-DestDir",   (Escape-Argument -Value $resolvedFinalDir),
-    "-PresetName", (Escape-Argument -Value $resolvedPresetName),
-    "-DryRun",
-    "-NoConfirm",
-    "-UseCliOnly"
+    "-PresetName", (Escape-Argument -Value $resolvedPresetName)
 )
+if (-not [string]::IsNullOrWhiteSpace($resolvedPresetImportFile)) {
+    $preflightArgs.Add("-PresetImportFile")
+    $preflightArgs.Add((Escape-Argument -Value $resolvedPresetImportFile))
+}
+if (-not [string]::IsNullOrWhiteSpace($resolvedHandBrakeCliPath) -and $resolvedHandBrakeCliPath -ne "HandBrakeCLI") {
+    $preflightArgs.Add("-HandBrakeCliPath")
+    $preflightArgs.Add((Escape-Argument -Value $resolvedHandBrakeCliPath))
+}
+$preflightArgs.AddRange([string[]]@("-DryRun", "-NoConfirm", "-UseCliOnly"))
 
 $preflightWatch = Start-StepTimer
 $preflightResult = Invoke-ToolScript -Label "preflight: videncode" -Exe $psExe -Arguments $preflightArgs
@@ -1042,7 +1057,7 @@ try {
         # STEP 3: videncode (encode unmatched files -> final folder)
         # ---------------------------------------------------------------------------
 
-        $encodeArgs = @(
+        $encodeArgs = [System.Collections.Generic.List[string]]@(
             "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
             (Escape-Argument -Value $resolvedVidencodeScript),
             "-SourceDir", (Escape-Argument -Value $resolvedHandbrakeDir),
@@ -1052,10 +1067,14 @@ try {
             "-InputFilesListFile", (Escape-Argument -Value $tempInputListPath),
             "-UseCliOnly"
         )
+        if (-not [string]::IsNullOrWhiteSpace($resolvedPresetImportFile)) {
+            $encodeArgs.Add("-PresetImportFile")
+            $encodeArgs.Add((Escape-Argument -Value $resolvedPresetImportFile))
+        }
         Set-Content -LiteralPath $tempInputListPath -Value $inputFilesForEncode -Encoding UTF8
         Write-DebugLog ("encode input transport=list_file count={0}" -f $inputFilesForEncode.Count)
-        $encodeArgs += "-NoConfirm"
-        if ($DryRun) { $encodeArgs += "-DryRun" }
+        $encodeArgs.Add("-NoConfirm")
+        if ($DryRun) { $encodeArgs.Add("-DryRun") }
 
         $encodeWatch = Start-StepTimer
         $encodeState = @{
