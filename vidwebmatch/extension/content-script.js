@@ -129,11 +129,14 @@ async function runScan() {
       });
 
       if (!response || response.ok !== true) {
-        showBanner("helper unavailable");
+        showBanner("helper unavailable — check extension popup");
       } else if (response.skipped) {
         // No-op; URL not matched.
       } else if (response.helperAvailable !== true) {
-        showBanner("helper unavailable");
+        const bannerText = response.driveUnavailable
+          ? "drive unavailable — mount drive and rescan"
+          : "helper unavailable — check extension popup";
+        showBanner(bannerText);
       } else {
         const statusByBase = buildStatusMap(response.results || []);
         renderBadges(extraction.locations, statusByBase, latestSettings);

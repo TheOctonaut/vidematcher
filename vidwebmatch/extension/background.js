@@ -378,11 +378,14 @@ async function handleScanRequest(message, sender) {
       results: allResults
     };
   } catch (error) {
+    const errorText = error instanceof Error ? error.message : String(error);
+    const isDriveUnavailable = /drive_unavailable|not accessible/i.test(errorText);
     return {
       ok: true,
       skipped: false,
       helperAvailable: false,
-      error: error instanceof Error ? error.message : String(error),
+      driveUnavailable: isDriveUnavailable,
+      error: errorText,
       results: []
     };
   }

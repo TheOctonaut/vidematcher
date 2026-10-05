@@ -108,18 +108,29 @@ internal sealed class HostEngine
 
         if (requestType.Equals("ping", StringComparison.OrdinalIgnoreCase))
         {
+            var rootAccessible = Directory.Exists(_options.SearchRoot);
+            if (!rootAccessible)
+            {
+                _logger.Error("ping_drive_unavailable", $"SearchRoot not accessible: {_options.SearchRoot}");
+                return Error(requestId, "drive_unavailable", $"Search root is not accessible: {_options.SearchRoot}");
+            }
             return JsonSerializer.Serialize(new
             {
                 type = "pong",
                 protocol_version = "1.0",
                 request_id = requestId,
-                ok = true
+                ok = true,
+                search_root = _options.SearchRoot
             });
         }
 
         if (requestType.Equals("refresh_index", StringComparison.OrdinalIgnoreCase))
         {
-            BuildIndex(forceRefresh: true);
+            var (_, refreshErrorCode, refreshErrorMessage) = BuildIndex(forceRefresh: true);
+            if (refreshErrorCode != null)
+            {
+                return Error(requestId, refreshErrorCode, refreshErrorMessage!);
+            }
             return JsonSerializer.Serialize(new
             {
                 type = "refresh_index_result",
@@ -158,7 +169,11 @@ internal sealed class HostEngine
         }
 
         var forceRefresh = GetOptionalBool(root, "force_refresh", false);
-        var index = BuildIndex(forceRefresh);
+        var (index, indexErrorCode, indexErrorMessage) = BuildIndex(forceRefresh);
+        if (indexErrorCode != null)
+        {
+            return Error(requestId, indexErrorCode, indexErrorMessage!);
+        }
         var results = new List<object>(filenames.Count);
 
         foreach (var inputName in filenames)
@@ -169,7 +184,7 @@ internal sealed class HostEngine
                 continue;
             }
 
-            index.ExactLookup.TryGetValue(baseName, out var exactHit);
+            index!.ExactLookup.TryGetValue(baseName, out var exactHit);
             var hasAvi = exactHit?.HasAvi ?? false;
             var hasMp4 = exactHit?.HasMp4 ?? false;
 
@@ -225,17 +240,29 @@ internal sealed class HostEngine
         });
     }
 
-    private IndexSnapshot BuildIndex(bool forceRefresh)
+    // Returns (snapshot, errorCode, errorMessage). errorCode is non-null when the drive/root is unavailable.
+    private (IndexSnapshot? Snapshot, string? ErrorCode, string? ErrorMessage) BuildIndex(bool forceRefresh)
     {
         lock (_indexLock)
         {
+            var resolvedRoot = _options.SearchRoot;
+
+            if (!Directory.Exists(resolvedRoot))
+            {
+                // Invalidate any stale cache so a later request re-checks once the drive is mounted.
+                _cachedIndex = null;
+                _cachedAtUtc = default;
+                _logger.Error("index_refresh_failed", $"SearchRoot not accessible: {resolvedRoot}");
+                return (null, "drive_unavailable", $"Search root is not accessible: {resolvedRoot}");
+            }
+
             var now = DateTimeOffset.UtcNow;
             if (!forceRefresh &&
                 _cachedIndex != null &&
                 _options.CacheTtlSeconds > 0 &&
                 now <= _cachedAtUtc.AddSeconds(_options.CacheTtlSeconds))
             {
-                return _cachedIndex;
+                return (_cachedIndex, null, null);
             }
 
             var extensionSet = new HashSet<string>(_options.MatchExtensions, StringComparer.OrdinalIgnoreCase);
@@ -249,11 +276,11 @@ internal sealed class HostEngine
                 AttributesToSkip = FileAttributes.ReparsePoint
             };
 
-            var rootWithSeparator = EnsureTrailingSeparator(Path.GetFullPath(_options.SearchRoot));
+            var rootWithSeparator = EnsureTrailingSeparator(Path.GetFullPath(resolvedRoot));
             var comparison = _options.CaseInsensitive ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
             var scannedFiles = 0;
 
-            foreach (var filePath in Directory.EnumerateFiles(_options.SearchRoot, "*", enumerationOptions))
+            foreach (var filePath in Directory.EnumerateFiles(resolvedRoot, "*", enumerationOptions))
             {
                 var fullPath = Path.GetFullPath(filePath);
                 if (!fullPath.StartsWith(rootWithSeparator, comparison))
@@ -304,8 +331,8 @@ internal sealed class HostEngine
 
             _cachedIndex = new IndexSnapshot(exactLookup, looseLookup);
             _cachedAtUtc = now;
-            _logger.Info($"index_refresh root={_options.SearchRoot} files={scannedFiles} basenames={exactLookup.Count} loose_keys={looseLookup.Count}");
-            return _cachedIndex;
+            _logger.Info($"index_refresh root={resolvedRoot} files={scannedFiles} basenames={exactLookup.Count} loose_keys={looseLookup.Count}");
+            return (_cachedIndex, null, null);
         }
     }
 
@@ -620,10 +647,8 @@ internal sealed class ResolvedOptions
         }
 
         var resolvedRoot = Path.GetFullPath(searchRoot);
-        if (!Directory.Exists(resolvedRoot))
-        {
-            throw new InvalidOperationException($"SearchRoot does not exist: {resolvedRoot}");
-        }
+        // Do not check Directory.Exists at startup; the drive may not be mounted yet.
+        // Each request checks availability at runtime and returns a structured error.
 
         var matchExtensions = ParseExtensions(cli.MatchExtensionsRaw)
             ?? NormalizeExtensions(fileOptions?.MatchExtensions)
