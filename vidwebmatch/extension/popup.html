@@ -18,6 +18,7 @@
     }
     .status.ok { background: #e7f7e7; color: #124d12; }
     .status.fail { background: #fdeaea; color: #7a1212; }
+    #driveStatus { overflow-wrap: anywhere; white-space: pre-wrap; }
     button {
       width: 100%;
       margin-bottom: 8px;
@@ -29,9 +30,14 @@
 <body>
   <div id="helperStatus" class="status">Checking helper...</div>
   <div id="startHint" class="hint" style="display:none;margin-bottom:8px;font-size:11px;color:#555;line-height:1.4;">
-    To start the helper, run <code>install-helper.ps1</code> in the <code>vidwebmatch</code> folder,
+    Firefox starts the registered helper automatically. No manual start is needed.
+    To repair registration, run <code>.\install-helper.ps1</code> from PowerShell in the
+    <code>vidwebmatch</code> folder with the correct helper path and search root,
     then re-open this popup.
   </div>
+  <button id="mountDriveButton">Mount drive</button>
+  <button id="unmountDriveButton">Unmount drive</button>
+  <div id="driveStatus" class="status" role="status" hidden></div>
   <button id="rescanButton">Rescan this page</button>
   <button id="openOptionsButton">Open options</button>
   <script src="popup.js"></script>

@@ -6,6 +6,7 @@ options.json
 vidtag/vidtag-vocab-cache.json
 vidwebmatch/native-host/bin/
 vidwebmatch/native-host/obj/
+vidwebmatch/web-ext-artifacts/
 webui/.env
 webui/runtime-configs/
 webui/app/__pycache__/

@@ -135,6 +135,23 @@ cd .\vidwebmatch
    - Click **Load Temporary Add-on**
    - Select `vidwebmatch/extension/manifest.json`
 
+### Package for Firefox Developer Hub
+
+The extension is plain JavaScript; no compilation or bundling is required.
+From the repository root, validate and package it with Mozilla's `web-ext`:
+
+```powershell
+npm exec --yes --package=web-ext@10.7.0 -- web-ext lint --source-dir .\vidwebmatch\extension
+npm exec --yes --package=web-ext@10.7.0 -- web-ext build --source-dir .\vidwebmatch\extension --artifacts-dir .\vidwebmatch\web-ext-artifacts
+```
+
+Increment `extension/manifest.json`'s version before each new submission. Keep the
+existing Gecko add-on ID to preserve the installed add-on's identity and settings.
+Upload the generated ZIP as a new version of the existing add-on in Firefox
+Developer Hub. The ZIP contains only extension files, with `manifest.json` at its
+root. The native helper is built and installed separately; it is not included.
+After signing, install the signed extension returned by Mozilla.
+
 ## Quick Start
 
 After the helper is built and installed:
@@ -153,6 +170,7 @@ The native helper only checks within the configured `SearchRoot`. It does not se
 
 Use the options page to control what is scanned and how matches are presented:
 
+- `Drive control base URL` / `Drive control key`: optional local settings for the popup's mount/unmount buttons.
 - `URL patterns`: page allow-list for scanning
 - `Scan links`: inspect link text and `href` filenames
 - `Scan visible text`: inspect page text nodes for `.avi` names
@@ -172,6 +190,29 @@ The popup is for quick runtime checks:
 - shows helper availability
 - shows the active host name
 - lets you manually rescan the current page
+
+#### Mounting and unmounting a drive
+
+Configure a base URL such as `https://example.com/jellymw/` and its key in
+Options, then click **Save**. The popup's **Mount drive** and **Unmount drive**
+buttons send background HTTP GET requests to `start?key=...` and `stop?key=...`.
+No tab opens. Unmounting requires confirmation because it may interrupt other
+applications using the drive. Requests are only allowed from the extension popup,
+never from scanned web pages.
+
+The popup displays the JSON response (up to 1,200 characters), HTTP errors,
+invalid JSON, connectivity failures or a 30-second timeout. Explicit `ok: false`,
+`success: false` or nonempty `error` fields are shown as failures. Other JSON is
+displayed as the service response, not a guarantee that mounting has finished.
+Helper status is checked again afterward; if mounting is still underway, reopen
+the popup once ready and use **Rescan this page**. No automatic mounting, retries,
+keepalive requests or unmounting occurs; idle disconnect remains the service's responsibility.
+
+Use HTTPS. The key is stored in `browser.storage.local` separately from scan
+settings, is not synced or returned to content scripts, and is not encrypted at rest.
+It is sent only to the configured endpoint; redirects and cookies are disabled.
+Neither the endpoint nor key is included in packaged defaults. Leave both fields
+blank and save to disable this feature.
 
 ### Page actions
 
@@ -206,6 +247,10 @@ Operational notes:
 - `options.json` is the local runtime config; `options.json.example` stays generic and committed.
 - The helper keeps an in-memory index for fast repeated lookups and refreshes it according to `CacheTtlSeconds` or a forced refresh request.
 - Logs are written to the configured `LogPath`.
+- Firefox launches the registered native helper on demand. There is no separate
+  manual start command or Windows startup service.
+- An inaccessible search root is reported as `drive_unavailable` without preventing
+  the helper from starting. Reconnect the drive and rescan to retry.
 
 ## Firefox Extension Behavior
 
@@ -253,7 +298,12 @@ Extension permissions:
 2. **Helper unavailable**
    - Verify helper registration with `install-helper.ps1`.
    - Confirm helper executable path exists.
+   - Ensure the registration's allowed extension ID matches `extension/manifest.json`.
+   - Firefox starts the helper automatically; `install-helper.ps1` repairs registration, not a running service.
    - Check helper log file from `options.json` (`LogPath`).
+   - If the popup reports **Helper connected, but search root is not accessible**,
+     mount/reconnect the drive or check folder permissions, then rescan. This is
+     distinct from Firefox being unable to start/connect to the helper.
 
 3. **Wrong status**
    - Confirm `SearchRoot` points to the correct library folder.
@@ -281,6 +331,12 @@ Extension permissions:
 8. Run `uninstall-helper.ps1` and confirm registry/manifest are removed.
 
 ## Minimal Test Plan
+
+Drive-control regression checks (no requests to the configured live service):
+
+```powershell
+node --test .\vidwebmatch\tests\drive-control.test.cjs
+```
 
 - Unit-level (helper behavior via runtime checks):
   - Config precedence: CLI > options file > defaults

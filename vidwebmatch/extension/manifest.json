@@ -1,17 +1,19 @@
 {
   "manifest_version": 2,
   "name": "vidwebmatch",
-  "version": "0.1.0",
+  "version": "0.3.1",
   "description": "Annotate .avi names on matching pages using local file status via native messaging.",
   "permissions": [
     "nativeMessaging",
     "storage",
     "tabs",
     "activeTab",
+    "contextMenus",
     "<all_urls>"
   ],
   "background": {
     "scripts": [
+      "drive-control.js",
       "background.js"
     ]
   },

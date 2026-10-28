@@ -28,7 +28,7 @@
     .input-with-button input[type="text"] {
       flex: 1;
     }
-    input[type="number"], input[type="text"], textarea {
+    input[type="number"], input[type="text"], input[type="password"], textarea {
       width: 100%;
       box-sizing: border-box;
       padding: 8px;
@@ -163,6 +163,18 @@
   <h1>vidwebmatch options</h1>
 
   <div class="row">
+    <label for="driveControlBaseUrl">Drive control base URL</label>
+    <input type="text" id="driveControlBaseUrl" placeholder="https://example.com/jellymw/">
+  </div>
+  <div class="row">
+    <label for="driveControlKey">Drive control key</label>
+    <input type="password" id="driveControlKey" autocomplete="off">
+    <p>Optional. Popup buttons call start?key=... and stop?key=... in the background.
+      Use HTTPS to protect the key in transit. Settings are saved locally in this Firefox profile,
+      not encrypted or synced. Leave both fields empty to disable drive control.</p>
+  </div>
+
+  <div class="row">
     <label for="urlPatterns">URL patterns (one match pattern per line)</label>
     <textarea id="urlPatterns" placeholder="*://example.com/*"></textarea>
   </div>
@@ -173,6 +185,7 @@
     <label><input type="checkbox" id="scanScopedTitles"> Scan scoped title text (no extension)</label>
     <label><input type="checkbox" id="dimDatePattern"> Dim date-like text pattern (NN NN NN)</label>
     <label><input type="checkbox" id="removeDimRows"> Remove matched rows instead of dimming</label>
+    <label><input type="checkbox" id="showOnlyHighlightedRows"> Show only highlighted rows (hiding all others)</label>
   </div>
 
   <div class="row">
@@ -261,6 +274,7 @@
     <span id="status"></span>
   </div>
 
+  <script src="drive-control.js"></script>
   <script src="options.js"></script>
 </body>
 </html>

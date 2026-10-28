@@ -12,6 +12,7 @@ const DEFAULT_SETTINGS = {
   dimRows: [],
   dismissedTitles: [],
   removeDimRows: false,
+  showOnlyHighlightedRows: false,
   dimDatePattern: false,
   batchSize: 150,
   maxCandidatesPerScan: 2000,
@@ -24,7 +25,10 @@ const scanVisibleTextInput = document.getElementById("scanVisibleText");
 const scanScopedTitlesInput = document.getElementById("scanScopedTitles");
 const dimDatePatternInput = document.getElementById("dimDatePattern");
 const removeDimRowsInput = document.getElementById("removeDimRows");
+const showOnlyHighlightedRowsInput = document.getElementById("showOnlyHighlightedRows");
 const titleScopeSelectorInput = document.getElementById("titleScopeSelector");
+const driveControlBaseUrlInput = document.getElementById("driveControlBaseUrl");
+const driveControlKeyInput = document.getElementById("driveControlKey");
 const studiosListEditor = createListEditor("studiosList");
 const actorsListEditor = createListEditor("actorsList");
 const dimStringsEditor = createListEditor("dimStrings");
@@ -52,8 +56,8 @@ saveButton.addEventListener("click", async () => {
   try {
     await persistSettings(true, true);
     statusElement.textContent = "Saved.";
-  } catch (_error) {
-    statusElement.textContent = "Save failed.";
+  } catch (error) {
+    statusElement.textContent = "Save failed: " + (error instanceof Error ? error.message : String(error));
   }
 });
 
@@ -122,14 +126,18 @@ load().catch(() => {
 async function load() {
   isLoading = true;
   try {
-    const value = await browser.storage.local.get("settings");
+    const value = await browser.storage.local.get(["settings", "driveControl"]);
     const settings = mergeSettings(value.settings || {});
+    const driveControl = value.driveControl || {};
+    driveControlBaseUrlInput.value = driveControl.baseUrl || "";
+    driveControlKeyInput.value = driveControl.key || "";
     urlPatternsInput.value = (settings.urlPatterns || []).join("\n");
     scanLinksInput.checked = Boolean(settings.scanLinks);
     scanVisibleTextInput.checked = Boolean(settings.scanVisibleText);
     scanScopedTitlesInput.checked = Boolean(settings.scanScopedTitles);
     dimDatePatternInput.checked = Boolean(settings.dimDatePattern);
     removeDimRowsInput.checked = Boolean(settings.removeDimRows);
+    showOnlyHighlightedRowsInput.checked = Boolean(settings.showOnlyHighlightedRows);
     titleScopeSelectorInput.value = String(settings.titleScopeSelector || ".torrentNameInfo");
     studiosListEditor.setValues(settings.studiosList || []);
     actorsListEditor.setValues(settings.actorsList || []);
@@ -374,6 +382,7 @@ function collectSettings(includePending) {
     scanScopedTitles: scanScopedTitlesInput.checked,
     dimDatePattern: dimDatePatternInput.checked,
     removeDimRows: removeDimRowsInput.checked,
+    showOnlyHighlightedRows: showOnlyHighlightedRowsInput.checked,
     titleScopeSelector: String(titleScopeSelectorInput.value || "").trim(),
     studiosList: studiosListEditor.getValues(),
     actorsList: actorsListEditor.getValues(),
@@ -386,9 +395,18 @@ function collectSettings(includePending) {
   });
 }
 
-async function persistSettings(_showStatus, includePending) {
+async function persistSettings(showStatus, includePending) {
+  const driveControl = showStatus ? validateDriveControl({
+    baseUrl: driveControlBaseUrlInput.value,
+    key: driveControlKeyInput.value
+  }) : null;
   const settings = collectSettings(includePending);
-  await browser.storage.local.set({ settings });
+  const current = await browser.storage.local.get("settings");
+  const updates = { settings: Object.assign({}, current.settings || {}, settings) };
+  if (driveControl) {
+    updates.driveControl = driveControl;
+  }
+  await browser.storage.local.set(updates);
 }
 
 function mergeSettings(partial) {

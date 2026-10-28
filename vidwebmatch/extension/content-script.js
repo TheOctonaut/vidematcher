@@ -5,6 +5,8 @@ const BANNER_ID = "vidwebmatch-helper-banner";
 const DIM_SPAN_ATTR = "data-vidwebmatch-dim";
 const DIMROW_CLASS = "vidwebmatch-dimrow";
 const HIDDENROW_CLASS = "vidwebmatch-row-hidden";
+const HIGHLIGHT_ROW_CLASS = "vidwebmatch-highlight-row";
+const HIDDEN_NONHIGHLIGHT_CLASS = "vidwebmatch-row-hidden-nonhighlight";
 const DISMISS_BUTTON_CLASS = "vidwebmatch-row-dismiss-button";
 const FLOATING_DISMISS_ID = "vidwebmatch-floating-dismiss";
 const FLOATING_DISMISS_CLASS = "vidwebmatch-floating-dismiss-button";
@@ -43,6 +45,14 @@ browser.runtime.onMessage.addListener((message) => {
     return undefined;
   }
   scheduleScan(Boolean(message.forceRefresh), true);
+  return Promise.resolve({ ok: true });
+});
+
+browser.runtime.onMessage.addListener((message) => {
+  if (!message || message.type !== "vidwebmatch:showAddToListDialog") {
+    return undefined;
+  }
+  showAddToListDialog(message.text || "");
   return Promise.resolve({ ok: true });
 });
 
@@ -117,9 +127,13 @@ async function runScan() {
     const hasDimStrings = Array.isArray(latestSettings.dimStrings) && latestSettings.dimStrings.length > 0;
     const hasDimDatePattern = Boolean(latestSettings.dimDatePattern);
     const hasDismissedTitles = Array.isArray(latestSettings.dismissedTitles) && latestSettings.dismissedTitles.length > 0;
-    const needsScopedNodes = Boolean(latestSettings.scanScopedTitles) || hasDimRows || hasDimStrings || hasDimDatePattern || hasDismissedTitles;
+    const hasFavourites = (Array.isArray(latestSettings.studiosList) && latestSettings.studiosList.length > 0)
+      || (Array.isArray(latestSettings.actorsList) && latestSettings.actorsList.length > 0);
+    const needsScopedNodes = Boolean(latestSettings.scanScopedTitles) || hasDimRows || hasDimStrings || hasDimDatePattern || hasDismissedTitles || hasFavourites;
     const allScopedNodes = needsScopedNodes ? Array.from(safeQuerySelectorAll(titleSelector)) : [];
 
+    let statusByBase = null;
+    let urlSkipped = false;
     if (extraction.uniqueFilenames.length > 0) {
       const response = await browser.runtime.sendMessage({
         type: "vidwebmatch:scanRequest",
@@ -129,21 +143,25 @@ async function runScan() {
       });
 
       if (!response || response.ok !== true) {
-        showBanner("helper unavailable — check extension popup");
+        showBanner(response && response.message ? response.message : "helper unavailable - check extension popup");
       } else if (response.skipped) {
-        // No-op; URL not matched.
+        urlSkipped = true;
       } else if (response.helperAvailable !== true) {
-        const bannerText = response.driveUnavailable
-          ? "drive unavailable — mount drive and rescan"
-          : "helper unavailable — check extension popup";
+        const bannerText = response.error || (response.driveUnavailable
+          ? "drive unavailable - mount drive and rescan"
+          : "helper unavailable - check extension popup");
         showBanner(bannerText);
       } else {
-        const statusByBase = buildStatusMap(response.results || []);
-        renderBadges(extraction.locations, statusByBase, latestSettings);
+        statusByBase = buildStatusMap(response.results || []);
       }
     }
 
+    // Favourite badges and row highlights do not depend on the helper.
+    if (!urlSkipped) {
+      renderBadges(extraction.locations, statusByBase, latestSettings);
+    }
     applyDimAnnotations(allScopedNodes, latestSettings);
+    applyHighlightingToRows(urlSkipped ? [] : allScopedNodes, latestSettings);
     manageFloatingDismissButton(latestSettings);
   } finally {
     scanning = false;
@@ -412,12 +430,14 @@ function renderBadges(locations, statusByBase, settings) {
     }
   }
 
-  for (const location of locations) {
-    const status = statusByBase.get(location.basename) || "missing";
+  for (const location of locations || []) {
     const baseKey = getLocationKey(location);
-    const statusKey = baseKey + "|status";
-    seenKeys.add(statusKey);
-    upsertBadge(existingBadges, location.anchorNode, statusKey, "status-" + status, status, location.filename + " -> " + status);
+    if (statusByBase) {
+      const status = statusByBase.get(location.basename) || "missing";
+      const statusKey = baseKey + "|status";
+      seenKeys.add(statusKey);
+      upsertBadge(existingBadges, location.anchorNode, statusKey, "status-" + status, status, location.filename + " -> " + status);
+    }
 
     const extraBadges = getExtraBadgesForLocation(location, settings);
     for (const extra of extraBadges) {
@@ -448,6 +468,51 @@ function renderBadges(locations, statusByBase, settings) {
     badge.title = title;
     badge.setAttribute("data-vidwebmatch-key", key);
     existingBadges.delete(key);
+  }
+}
+
+function applyHighlightingToRows(scopedNodes, settings) {
+  const studios = settings && settings.studiosList;
+  const actors = settings && settings.actorsList;
+  const showOnlyHighlighted = Boolean(settings && settings.showOnlyHighlightedRows);
+
+  const highlightRows = new Set();
+  const plainRows = new Set();
+  for (const node of scopedNodes || []) {
+    const row = getDimTargetRow(node);
+    if (!row) {
+      continue;
+    }
+    const text = getScopedTitleText(node);
+    if (text && (findListMatch(text, studios) || findListMatch(text, actors))) {
+      highlightRows.add(row);
+    } else {
+      plainRows.add(row);
+    }
+  }
+
+  // Only touch classes that actually change to avoid needless DOM churn.
+  for (const row of document.querySelectorAll("." + HIGHLIGHT_ROW_CLASS)) {
+    if (!highlightRows.has(row)) {
+      row.classList.remove(HIGHLIGHT_ROW_CLASS);
+    }
+  }
+  for (const row of document.querySelectorAll("." + HIDDEN_NONHIGHLIGHT_CLASS)) {
+    if (!showOnlyHighlighted || highlightRows.has(row) || !plainRows.has(row)) {
+      row.classList.remove(HIDDEN_NONHIGHLIGHT_CLASS);
+    }
+  }
+  for (const row of highlightRows) {
+    if (!row.classList.contains(HIGHLIGHT_ROW_CLASS)) {
+      row.classList.add(HIGHLIGHT_ROW_CLASS);
+    }
+  }
+  if (showOnlyHighlighted) {
+    for (const row of plainRows) {
+      if (!highlightRows.has(row) && !row.classList.contains(HIDDEN_NONHIGHLIGHT_CLASS)) {
+        row.classList.add(HIDDEN_NONHIGHLIGHT_CLASS);
+      }
+    }
   }
 }
 
@@ -605,6 +670,14 @@ function isOurNode(node) {
   }
 
   if (node.classList && node.classList.contains(DIMROW_CLASS)) {
+    return true;
+  }
+
+  if (node.classList && node.classList.contains(HIGHLIGHT_ROW_CLASS)) {
+    return true;
+  }
+
+  if (node.classList && node.classList.contains(HIDDEN_NONHIGHLIGHT_CLASS)) {
     return true;
   }
 
@@ -1035,6 +1108,137 @@ function clampInteger(value, min, max, fallback) {
   return parsed;
 }
 
+function showAddToListDialog(text) {
+  if (!text || typeof text !== "string") {
+    return;
+  }
+
+  const trimmed = text.trim();
+  if (!trimmed) {
+    return;
+  }
+
+  // Create a simple modal dialog
+  const modal = document.createElement("div");
+  modal.id = "vidwebmatch-add-to-list-modal";
+  modal.style.position = "fixed";
+  modal.style.top = "0";
+  modal.style.left = "0";
+  modal.style.width = "100%";
+  modal.style.height = "100%";
+  modal.style.backgroundColor = "rgba(0, 0, 0, 0.5)";
+  modal.style.zIndex = "2147483646";
+  modal.style.display = "flex";
+  modal.style.alignItems = "center";
+  modal.style.justifyContent = "center";
+  modal.style.fontFamily = "Segoe UI, Arial, sans-serif";
+
+  const dialog = document.createElement("div");
+  dialog.style.backgroundColor = "#2a2a2a";
+  dialog.style.color = "#f0f0f0";
+  dialog.style.borderRadius = "8px";
+  dialog.style.padding = "20px";
+  dialog.style.maxWidth = "400px";
+  dialog.style.boxShadow = "0 4px 20px rgba(0, 0, 0, 0.7)";
+
+  const title = document.createElement("h3");
+  title.textContent = "Add to list";
+  title.style.marginTop = "0";
+  title.style.marginBottom = "12px";
+
+  const textDisplay = document.createElement("div");
+  textDisplay.textContent = "Text: " + trimmed;
+  textDisplay.style.marginBottom = "16px";
+  textDisplay.style.padding = "8px";
+  textDisplay.style.backgroundColor = "#1a1a1a";
+  textDisplay.style.borderRadius = "4px";
+  textDisplay.style.wordBreak = "break-word";
+
+  const listLabel = document.createElement("label");
+  listLabel.textContent = "Choose a list:";
+  listLabel.style.display = "block";
+  listLabel.style.marginBottom = "8px";
+
+  const select = document.createElement("select");
+  select.style.width = "100%";
+  select.style.padding = "8px";
+  select.style.marginBottom = "16px";
+  select.style.backgroundColor = "#1a1a1a";
+  select.style.color = "#f0f0f0";
+  select.style.border = "1px solid #555";
+  select.style.borderRadius = "4px";
+
+  const options = [
+    { value: "studiosList", label: "Favourite producers" },
+    { value: "actorsList", label: "Favourite performers" },
+    { value: "dimStrings", label: "Dimmed strings" },
+    { value: "dimRows", label: "Dimmed rows" }
+  ];
+
+  for (const opt of options) {
+    const option = document.createElement("option");
+    option.value = opt.value;
+    option.textContent = opt.label;
+    select.appendChild(option);
+  }
+
+  const buttons = document.createElement("div");
+  buttons.style.display = "flex";
+  buttons.style.gap = "8px";
+  buttons.style.justifyContent = "flex-end";
+
+  const cancelButton = document.createElement("button");
+  cancelButton.textContent = "Cancel";
+  cancelButton.style.padding = "8px 16px";
+  cancelButton.style.backgroundColor = "#555";
+  cancelButton.style.color = "#f0f0f0";
+  cancelButton.style.border = "none";
+  cancelButton.style.borderRadius = "4px";
+  cancelButton.style.cursor = "pointer";
+  cancelButton.addEventListener("click", () => {
+    modal.remove();
+  });
+
+  const addButton = document.createElement("button");
+  addButton.textContent = "Add";
+  addButton.style.padding = "8px 16px";
+  addButton.style.backgroundColor = "#0066cc";
+  addButton.style.color = "#fff";
+  addButton.style.border = "none";
+  addButton.style.borderRadius = "4px";
+  addButton.style.cursor = "pointer";
+  addButton.addEventListener("click", async () => {
+    const list = select.value;
+    try {
+      const settings = await browser.runtime.sendMessage({ type: "vidwebmatch:getSettings" });
+      if (settings && Array.isArray(settings[list])) {
+        if (!settings[list].includes(trimmed)) {
+          settings[list].push(trimmed);
+          await browser.runtime.sendMessage({
+            type: "vidwebmatch:saveSettings",
+            settings: settings
+          });
+        }
+      }
+      modal.remove();
+      scheduleScan(false, true);
+    } catch (error) {
+      alert("Failed to add to list: " + (error instanceof Error ? error.message : String(error)));
+    }
+  });
+
+  buttons.appendChild(cancelButton);
+  buttons.appendChild(addButton);
+
+  dialog.appendChild(title);
+  dialog.appendChild(textDisplay);
+  dialog.appendChild(listLabel);
+  dialog.appendChild(select);
+  dialog.appendChild(buttons);
+  modal.appendChild(dialog);
+  document.documentElement.appendChild(modal);
+}
+
 const style = document.createElement("style");
 style.textContent = `
 .${BADGE_CLASS} {
@@ -1059,6 +1263,19 @@ style.textContent = `
 [${DIM_SPAN_ATTR}] { opacity: 0.35; }
 .${DIMROW_CLASS} { opacity: 0.3; }
 .${HIDDENROW_CLASS} { display: none !important; }
+.${HIGHLIGHT_ROW_CLASS},
+.${HIGHLIGHT_ROW_CLASS} > td,
+.${HIGHLIGHT_ROW_CLASS} > th {
+  background-color: #daa520 !important;
+}
+@media (prefers-color-scheme: light) {
+  .${HIGHLIGHT_ROW_CLASS},
+  .${HIGHLIGHT_ROW_CLASS} > td,
+  .${HIGHLIGHT_ROW_CLASS} > th {
+    background-color: #8b6914 !important;
+  }
+}
+.${HIDDEN_NONHIGHLIGHT_CLASS} { display: none !important; }
 .${DISMISS_BUTTON_CLASS} {
   margin-left: 6px;
   border: 1px solid #888;

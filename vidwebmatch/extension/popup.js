@@ -4,6 +4,36 @@ const helperStatusElement = document.getElementById("helperStatus");
 const startHintElement = document.getElementById("startHint");
 const rescanButton = document.getElementById("rescanButton");
 const openOptionsButton = document.getElementById("openOptionsButton");
+const mountDriveButton = document.getElementById("mountDriveButton");
+const unmountDriveButton = document.getElementById("unmountDriveButton");
+const driveStatusElement = document.getElementById("driveStatus");
+
+mountDriveButton.addEventListener("click", () => requestDriveControl("start"));
+unmountDriveButton.addEventListener("click", () => {
+  if (window.confirm("Unmount the drive? This may interrupt scans, playback or other applications using it.")) {
+    requestDriveControl("stop");
+  }
+});
+
+async function requestDriveControl(action) {
+  mountDriveButton.disabled = true;
+  unmountDriveButton.disabled = true;
+  driveStatusElement.hidden = false;
+  driveStatusElement.classList.remove("ok", "fail");
+  driveStatusElement.textContent = action === "start" ? "Requesting mount..." : "Requesting unmount...";
+  try {
+    const response = await browser.runtime.sendMessage({ type: "vidwebmatch:driveControl", action });
+    driveStatusElement.textContent = response && response.message ? response.message : "Drive control returned no response.";
+    driveStatusElement.classList.add(response && response.ok ? "ok" : "fail");
+    await initialize();
+  } catch (error) {
+    driveStatusElement.textContent = "Drive control failed: " + (error instanceof Error ? error.message : String(error));
+    driveStatusElement.classList.add("fail");
+  } finally {
+    mountDriveButton.disabled = false;
+    unmountDriveButton.disabled = false;
+  }
+}
 
 initialize().catch(() => {
   showStartHint();
@@ -11,18 +41,23 @@ initialize().catch(() => {
 });
 
 rescanButton.addEventListener("click", async () => {
-  const response = await browser.runtime.sendMessage({
-    type: "vidwebmatch:rescanActiveTab",
-    forceRefresh: true
-  });
+  try {
+    const response = await browser.runtime.sendMessage({
+      type: "vidwebmatch:rescanActiveTab",
+      forceRefresh: true
+    });
 
-  if (response && response.ok) {
-    window.close();
-    return;
+    if (response && response.ok) {
+      window.close();
+      return;
+    }
+
+    const message = response && response.message ? response.message : "Failed to request rescan.";
+    setHelperStatus(message, false);
+  } catch (error) {
+    const details = error instanceof Error ? error.message : String(error);
+    setHelperStatus("Failed to request rescan: " + details, false);
   }
-
-  const message = response && response.message ? response.message : "Failed to request rescan.";
-  setHelperStatus(message, false);
 });
 
 openOptionsButton.addEventListener("click", () => {
@@ -30,6 +65,7 @@ openOptionsButton.addEventListener("click", () => {
 });
 
 async function initialize() {
+  startHintElement.style.display = "none";
   try {
     const response = await browser.runtime.sendMessage({ type: "vidwebmatch:pingHelper" });
     if (response && response.ok) {
@@ -38,29 +74,16 @@ async function initialize() {
       return;
     }
 
-    const raw = response && response.message ? response.message : "";
-    const message = interpretHelperError(raw);
+    if (!response || !response.driveUnavailable) {
+      showStartHint();
+    }
+    const message = response && response.message ? response.message : "Helper check returned no response.";
     setHelperStatus(message, false);
   } catch (error) {
     const details = error instanceof Error ? error.message : String(error);
-    setHelperStatus(interpretHelperError(details) || "Helper check failed.", false);
-  }
-}
-
-function interpretHelperError(raw) {
-  if (!raw || raw.trim() === "") {
     showStartHint();
-    return "Helper is not running.";
+    setHelperStatus("Could not check helper: " + details, false);
   }
-  if (/drive_unavailable|not accessible/i.test(raw)) {
-    return raw + " — mount the drive and click Rescan.";
-  }
-  if (/could not be found|no such host|native messaging/i.test(raw)) {
-    showStartHint();
-    return "Helper is not running.";
-  }
-  showStartHint();
-  return raw;
 }
 
 function showStartHint() {

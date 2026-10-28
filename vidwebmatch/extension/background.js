@@ -12,6 +12,7 @@ const DEFAULT_SETTINGS = {
   dimRows: [],
   dismissedTitles: [],
   removeDimRows: false,
+  showOnlyHighlightedRows: false,
   dimDatePattern: false,
   debounceMs: 400,
   batchSize: 150,
@@ -28,6 +29,27 @@ browser.runtime.onInstalled.addListener(async () => {
     await browser.storage.local.set({ settings: merged });
   } catch (_error) {
     // Keep background script alive even if initial settings sync fails.
+  }
+});
+
+// Initialize context menu for adding text to lists
+browser.runtime.onInstalled.addListener(() => {
+  browser.contextMenus.create({
+    id: "vidwebmatch-add-to-list",
+    title: "vidwebmatch: Add \"%s\" to list...",
+    contexts: ["selection"],
+    documentUrlPatterns: ["<all_urls>"]
+  });
+});
+
+browser.contextMenus.onClicked.addListener((info, tab) => {
+  if (info.menuItemId === "vidwebmatch-add-to-list" && info.selectionText) {
+    browser.tabs.sendMessage(tab.id, {
+      type: "vidwebmatch:showAddToListDialog",
+      text: info.selectionText.trim()
+    }).catch(() => {
+      // Silently fail if content script isn't ready
+    });
   }
 });
 
@@ -63,6 +85,13 @@ async function handleMessage(message, sender) {
 
     if (message.type === "vidwebmatch:pingHelper") {
       return pingHelper();
+    }
+
+    if (message.type === "vidwebmatch:driveControl") {
+      if (!sender || sender.url !== browser.runtime.getURL("popup.html")) {
+        return { ok: false, message: "Drive control is only available from the extension popup." };
+      }
+      return controlDrive(message.action);
     }
 
     if (message.type === "vidwebmatch:closeActiveTab") {
@@ -365,8 +394,16 @@ async function handleScanRequest(message, sender) {
       };
       const response = await sendNativeRequest(payload, settings.nativeHostName);
       if (!response || response.ok !== true || !Array.isArray(response.results)) {
-        const messageText = response && response.message ? response.message : "Helper returned an invalid response.";
-        throw new Error(messageText);
+        const failure = describeHelperFailure(response);
+        return {
+          ok: true,
+          skipped: false,
+          helperAvailable: false,
+          driveUnavailable: failure.driveUnavailable,
+          errorCode: failure.errorCode,
+          error: failure.message,
+          results: []
+        };
       }
       allResults.push(...response.results);
     }
@@ -378,14 +415,14 @@ async function handleScanRequest(message, sender) {
       results: allResults
     };
   } catch (error) {
-    const errorText = error instanceof Error ? error.message : String(error);
-    const isDriveUnavailable = /drive_unavailable|not accessible/i.test(errorText);
+    const failure = describeHelperFailure(null, error);
     return {
       ok: true,
       skipped: false,
       helperAvailable: false,
-      driveUnavailable: isDriveUnavailable,
-      error: errorText,
+      driveUnavailable: failure.driveUnavailable,
+      errorCode: failure.errorCode,
+      error: failure.message,
       results: []
     };
   }
@@ -433,10 +470,115 @@ async function pingHelper() {
       type: "ping",
       request_id: generateRequestId()
     });
+    if (!response || response.ok !== true || response.type !== "pong") {
+      return Object.assign({ ok: false }, describeHelperFailure(response));
+    }
     return { ok: true, response };
   } catch (error) {
+    return Object.assign({ ok: false }, describeHelperFailure(null, error));
+  }
+}
+
+function describeHelperFailure(response, error) {
+  if (response && response.ok === false) {
+    const errorCode = response.error_code || "helper_error";
+    const driveUnavailable = errorCode === "drive_unavailable";
+    const details = response.message || "Helper reported an error.";
+    return {
+      errorCode,
+      driveUnavailable,
+      message: driveUnavailable
+        ? "Helper connected, but " + details + " Mount or reconnect the drive, check folder permissions, then rescan."
+        : details
+    };
+  }
+  if (error) {
     const details = error instanceof Error ? error.message : String(error);
-    return { ok: false, message: details };
+    return {
+      errorCode: "native_connection_failed",
+      driveUnavailable: false,
+      message: "Firefox could not start or connect to the helper. Check its registration, executable and log." +
+        (details ? " Firefox reported: " + details : "")
+    };
+  }
+  return {
+    errorCode: "invalid_response",
+    driveUnavailable: false,
+    message: "Helper returned an invalid response. Check its version and log."
+  };
+}
+
+let driveControlBusy = false;
+
+async function controlDrive(action) {
+  if (action !== "start" && action !== "stop") {
+    return { ok: false, message: "Invalid drive control action." };
+  }
+  if (driveControlBusy) {
+    return { ok: false, message: "A drive control request is already in progress." };
+  }
+  driveControlBusy = true;
+  let timer;
+  let controller;
+  try {
+    const value = await browser.storage.local.get("driveControl");
+    const settings = validateDriveControl(value.driveControl || {});
+    if (!settings.baseUrl) {
+      return { ok: false, message: "Configure the drive control base URL and key in Options first." };
+    }
+    const url = new URL(action, settings.baseUrl);
+    url.searchParams.set("key", settings.key);
+    controller = new AbortController();
+    timer = setTimeout(() => controller.abort(), 30000);
+    const response = await fetch(url.href, {
+      method: "GET",
+      credentials: "omit",
+      cache: "no-store",
+      redirect: "error",
+      referrerPolicy: "no-referrer",
+      signal: controller.signal
+    });
+    if (!response.ok) {
+      return { ok: false, message: "Drive control request failed: HTTP " + response.status + "." };
+    }
+    let result;
+    try {
+      result = await response.json();
+    } catch (error) {
+      if (controller.signal.aborted) {
+        throw error;
+      }
+      return { ok: false, message: "Drive control returned an invalid JSON response." };
+    }
+    let details = JSON.stringify(result);
+    for (const secret of [
+      JSON.stringify(settings.key).slice(1, -1),
+      settings.key,
+      encodeURIComponent(settings.key),
+      url.searchParams.toString().substring(4)
+    ]) {
+      details = details.split(secret).join("[redacted]");
+    }
+    details = details.slice(0, 1200);
+    const failed = result && typeof result === "object" &&
+      (result.ok === false || result.success === false || Boolean(result.error));
+    return {
+      ok: !failed,
+      message: (failed ? "Drive service reported a failure: " : "Drive service response: ") + details
+    };
+  } catch (error) {
+    if (controller) {
+      return {
+        ok: false,
+        message: controller.signal.aborted
+          ? "Drive control timed out after 30 seconds. Its outcome is unknown; check the drive before retrying."
+          : "Drive control could not complete. Check connectivity, the base URL and key; redirects are not allowed."
+      };
+    }
+    return { ok: false, message: error instanceof Error ? error.message : "Could not load drive control settings." };
+  } finally {
+    clearTimeout(timer);
+    driveControlBusy = false;
   }
 }
 
