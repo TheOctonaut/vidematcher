@@ -8,7 +8,7 @@ const extensionDir = path.join(__dirname, "..", "extension");
 const popupUrl = "moz-extension://test/popup.html";
 
 function createHost(settings = { baseUrl: "https://example.test/jellymw/", key: "test key&value" }) {
-  const state = { requests: [], settings, timers: [] };
+  const state = { requests: [], settings, timers: [], storage: {} };
   const context = vm.createContext({
     URL, AbortController, console,
     setTimeout(callback, delay) {
@@ -24,6 +24,7 @@ function createHost(settings = { baseUrl: "https://example.test/jellymw/", key: 
       return { ok: true, async json() { return { mounted: true }; } };
     },
     browser: {
+      contextMenus: { onClicked: { addListener() {} } },
       runtime: {
         getURL(file) { return "moz-extension://test/" + file; },
         onInstalled: { addListener() {} },
@@ -32,8 +33,9 @@ function createHost(settings = { baseUrl: "https://example.test/jellymw/", key: 
       storage: {
         local: {
           async get(key) {
-            return key === "driveControl" ? { driveControl: state.settings } : { settings: {} };
-          }
+            return key === "driveControl" ? { driveControl: state.settings } : { [key]: state.storage[key] };
+          },
+          async set(values) { Object.assign(state.storage, values); }
         }
       }
     }
@@ -123,27 +125,152 @@ test("HTTP, JSON, network and service failures are explicit and secrets are reda
   }
 });
 
-test("timeout and overlapping requests do not report success or cause duplicate actions", async () => {
+test("timeouts report unknown outcome and manual stop waits for an in-flight start", async () => {
   const host = createHost();
   host.state.fetch = (_url, options) => new Promise((_resolve, reject) => {
     options.signal.addEventListener("abort", () => reject(new Error("aborted")));
   });
   const pending = host.request("start");
   await new Promise(resolve => setImmediate(resolve));
-  assert.equal((await host.request("stop")).ok, false);
+  const stop = host.request("stop");
+  await new Promise(resolve => setImmediate(resolve));
   assert.equal(host.state.requests.length, 1);
+  host.state.fetch = null;
   host.state.timers.at(-1).callback();
   const response = await pending;
   assert.equal(response.ok, false);
   assert.match(response.message, /timed out.*outcome is unknown/);
-  host.state.fetch = null;
+  assert.equal((await stop).ok, true);
+  assert.equal(new URL(host.state.requests[1].url).pathname, "/jellymw/stop");
+  assert.equal(host.state.storage.driveKeepAlive.enabled, false);
   assert.equal((await host.request("start")).ok, true);
+});
+
+function pageLoad(host, sender = { url: "https://watched.test/list", tab: { id: 1 }, frameId: 0 }) {
+  return host.context.handleMessage({
+    type: "vidwebmatch:pageLoaded", pageUrl: "https://watched.test/forged", action: "stop"
+  }, sender);
+}
+
+test("keep-alive is opt-in, persists separately, and sends one start for each watched page load", async () => {
+  const host = createHost();
+  host.state.storage.settings = { urlPatterns: ["https://watched.test/*"] };
+  assert.equal((await pageLoad(host)).skipped, true);
+  assert.equal(host.state.requests.length, 0);
+  assert.equal((await host.request("start")).ok, true);
+  assert.equal(host.state.storage.driveKeepAlive.enabled, true);
+  for (let i = 0; i < 2; i++) {
+    assert.equal((await pageLoad(host)).ok, true);
+    assert.equal(new URL(host.state.requests.at(-1).url).pathname, "/jellymw/start");
+  }
+  assert.equal(host.state.requests.length, 3);
+  // Reload the background with the persisted state, without contacting the helper.
+  const restarted = createHost();
+  restarted.state.storage = structuredClone(host.state.storage);
+  assert.equal((await pageLoad(restarted)).ok, true);
+  assert.equal(restarted.state.requests.length, 1);
+  assert.equal(restarted.state.storage.settings.driveKeepAlive, undefined);
+});
+
+test("keep-alive trusts the actual top-level sender URL and enabled scan modes", async () => {
+  const host = createHost();
+  await host.request("start");
+  host.state.storage.settings = { urlPatterns: ["https://watched.test/*"] };
+  for (const sender of [
+    { url: "https://unwatched.test/", tab: { id: 1 }, frameId: 0 },
+    { url: "https://watched.test/", tab: { id: 1 }, frameId: 1 },
+    { url: "https://watched.test/", frameId: 0 },
+    { url: "file:///watched.test/", tab: { id: 1 }, frameId: 0 },
+    {}
+  ]) {
+    const result = await pageLoad(host, sender);
+    assert.ok(result.skipped || result.ok === false);
+  }
+  host.state.storage.settings = {
+    urlPatterns: ["https://watched.test/*"],
+    scanLinks: false, scanVisibleText: false, scanScopedTitles: false
+  };
+  assert.equal((await pageLoad(host)).skipped, true);
+  assert.equal(host.state.requests.length, 1);
+});
+
+test("failed mounts do not enable keep-alive and automatic failures stay visible without disarming it", async () => {
+  const host = createHost();
+  host.state.fetch = async () => ({ ok: false, status: 502 });
+  assert.equal((await host.request("start")).ok, false);
+  assert.equal(host.state.storage.driveKeepAlive.enabled, false);
+  assert.equal((await pageLoad(host)).skipped, true);
+  host.state.fetch = null;
+  await host.request("start");
+  host.state.fetch = async () => ({ ok: false, status: 502 });
+  assert.equal((await pageLoad(host)).ok, false);
+  assert.equal(host.state.storage.driveKeepAlive.enabled, true);
+  assert.match(host.state.storage.driveKeepAlive.lastError, /HTTP 502/);
+  host.state.fetch = null;
+  await pageLoad(host);
+  assert.equal(host.state.storage.driveKeepAlive.lastError, "");
+});
+
+test("stop disables keep-alive even on service failure and queued page loads cannot remount", async () => {
+  const host = createHost();
+  await host.request("start");
+  let release;
+  host.state.fetch = () => new Promise(resolve => { release = resolve; });
+  const active = pageLoad(host);
+  await new Promise(resolve => setImmediate(resolve));
+  const stop = host.request("stop");
+  const queued = pageLoad(host);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(host.state.requests.length, 2);
+  host.state.fetch = async () => ({ ok: false, status: 503 });
+  release({ ok: true, async json() { return { mounted: true }; } });
+  await active;
+  assert.equal((await stop).ok, false);
+  assert.equal((await queued).skipped, true);
+  assert.equal(new URL(host.state.requests.at(-1).url).pathname, "/jellymw/stop");
+  assert.equal(host.state.requests.length, 3);
+  assert.equal(host.state.storage.driveKeepAlive.enabled, false);
+  await pageLoad(host);
+  assert.equal(host.state.requests.length, 3);
+});
+
+test("content script sends page-load once without waiting for keep-alive, not on rescans", async () => {
+  const messages = [];
+  const timers = [];
+  const context = vm.createContext({
+    console, setTimeout(callback) { timers.push(callback); return timers.length; },
+    clearTimeout() {},
+    document: {
+      addEventListener() {},
+      createElement() { return {}; },
+      documentElement: { appendChild() {} }
+    },
+    browser: { runtime: {
+      onMessage: { addListener() {} },
+      async sendMessage(message) {
+        messages.push(message);
+        if (message.type === "vidwebmatch:getSettings") {
+          return {};
+        }
+        return new Promise(() => {}); // The drive service never replies.
+      }
+    } }
+  });
+  const source = fs.readFileSync(path.join(extensionDir, "content-script.js"), "utf8");
+  vm.runInContext(source + "\ninstallObserver = () => {}; runScan = async () => {};", context);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(messages.filter(m => m.type === "vidwebmatch:pageLoaded").length, 1);
+  assert.equal(timers.length, 1); // Scanning is scheduled even while start is pending.
+  timers[0]();
+  context.scheduleScan(false, true);
+  timers.at(-1)();
+  assert.equal(messages.filter(m => m.type === "vidwebmatch:pageLoaded").length, 1);
 });
 
 test("popup confirms unmount, prevents repeated clicks and refreshes helper status", async () => {
   const elements = Object.fromEntries([
     "helperStatus", "startHint", "rescanButton", "openOptionsButton",
-    "mountDriveButton", "unmountDriveButton", "driveStatus"
+    "mountDriveButton", "unmountDriveButton", "driveStatus", "keepAliveStatus"
   ].map(id => [id, {
     style: {}, classList: { remove() {}, add() {} },
     addEventListener(event, handler) { this[event] = handler; }
@@ -154,7 +281,9 @@ test("popup confirms unmount, prevents repeated clicks and refreshes helper stat
   const context = vm.createContext({
     document: { getElementById(id) { return elements[id]; } },
     window: { confirm() { return confirmed; } },
-    browser: { runtime: {
+    browser: { storage: { local: { async get() {
+      return { driveKeepAlive: { enabled: true, lastError: "HTTP 502" } };
+    } } }, runtime: {
       async sendMessage(message) {
         requests.push(message);
         if (message.type === "vidwebmatch:driveControl") {
@@ -166,6 +295,7 @@ test("popup confirms unmount, prevents repeated clicks and refreshes helper stat
   });
   vm.runInContext(fs.readFileSync(path.join(extensionDir, "popup.js"), "utf8"), context);
   await new Promise(resolve => setImmediate(resolve));
+  assert.match(elements.keepAliveStatus.textContent, /keep-alive on.*HTTP 502/);
   elements.unmountDriveButton.click();
   assert.equal(requests.filter(r => r.type === "vidwebmatch:driveControl").length, 0);
   confirmed = true;

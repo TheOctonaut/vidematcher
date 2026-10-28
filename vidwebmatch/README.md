@@ -197,16 +197,29 @@ Configure a base URL such as `https://example.com/jellymw/` and its key in
 Options, then click **Save**. The popup's **Mount drive** and **Unmount drive**
 buttons send background HTTP GET requests to `start?key=...` and `stop?key=...`.
 No tab opens. Unmounting requires confirmation because it may interrupt other
-applications using the drive. Requests are only allowed from the extension popup,
-never from scanned web pages.
+applications using the drive. Manual start/stop requests are only allowed from the
+extension popup. Web pages cannot choose a drive action, endpoint or key.
+
+A successful **Mount drive** request also enables keep-alive. On each subsequent
+top-level HTTP(S) page load whose URL matches your configured URL patterns, with
+at least one scan mode enabled, the extension repeats the configured `start?key=...`
+request in the background. This is once per page load, not on DOM changes,
+manual rescans or a timer, and does not depend on the helper or drive being
+available. It also runs on watched pages with no detected filenames.
+The enabled state survives browser restarts. Clicking **Unmount drive** (and
+confirming) disables keep-alive even if the stop request fails, so browsing will
+not remount the drive afterward. Requests are serialized so a pending keep-alive
+finishes before a queued stop. The popup shows whether keep-alive is enabled and
+the last drive request failure; automatic failures also display a page banner.
 
 The popup displays the JSON response (up to 1,200 characters), HTTP errors,
 invalid JSON, connectivity failures or a 30-second timeout. Explicit `ok: false`,
 `success: false` or nonempty `error` fields are shown as failures. Other JSON is
 displayed as the service response, not a guarantee that mounting has finished.
 Helper status is checked again afterward; if mounting is still underway, reopen
-the popup once ready and use **Rescan this page**. No automatic mounting, retries,
-keepalive requests or unmounting occurs; idle disconnect remains the service's responsibility.
+the popup once ready and use **Rescan this page**. There are no periodic retries
+or automatic unmounts; idle disconnect remains the service's responsibility.
+Without watched page loads, the service can still time out normally.
 
 Use HTTPS. The key is stored in `browser.storage.local` separately from scan
 settings, is not synced or returned to content scripts, and is not encrypted at rest.

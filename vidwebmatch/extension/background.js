@@ -94,6 +94,20 @@ async function handleMessage(message, sender) {
       return controlDrive(message.action);
     }
 
+    if (message.type === "vidwebmatch:pageLoaded") {
+      const pageUrl = sender && sender.url;
+      if (!sender || !sender.tab || sender.frameId !== 0 ||
+          typeof pageUrl !== "string" || !/^https?:\/\//i.test(pageUrl)) {
+        return { ok: false, message: "Drive keep-alive requires a top-level web page." };
+      }
+      const settings = await getSettings();
+      if (!isUrlAllowed(pageUrl, settings.urlPatterns) ||
+          !(settings.scanLinks || settings.scanVisibleText || settings.scanScopedTitles)) {
+        return { ok: true, skipped: true };
+      }
+      return controlDrive("start", true);
+    }
+
     if (message.type === "vidwebmatch:closeActiveTab") {
       return closeSenderTab(sender);
     }
@@ -508,16 +522,35 @@ function describeHelperFailure(response, error) {
   };
 }
 
-let driveControlBusy = false;
+let driveControlQueue = Promise.resolve();
 
-async function controlDrive(action) {
+function controlDrive(action, automatic = false) {
   if (action !== "start" && action !== "stop") {
-    return { ok: false, message: "Invalid drive control action." };
+    return Promise.resolve({ ok: false, message: "Invalid drive control action." });
   }
-  if (driveControlBusy) {
-    return { ok: false, message: "A drive control request is already in progress." };
-  }
-  driveControlBusy = true;
+  const run = async () => {
+    const value = await browser.storage.local.get("driveKeepAlive");
+    const enabled = Boolean(value.driveKeepAlive && value.driveKeepAlive.enabled);
+    if (automatic && !enabled) {
+      return { ok: true, skipped: true };
+    }
+    // Disable before contacting the service, including when stopping fails.
+    if (action === "stop") {
+      await browser.storage.local.set({ driveKeepAlive: { enabled: false, lastError: "" } });
+    }
+    const result = await performDriveControl(action);
+    const nextEnabled = action === "stop" ? false : (enabled || result.ok);
+    await browser.storage.local.set({
+      driveKeepAlive: { enabled: nextEnabled, lastError: result.ok ? "" : result.message }
+    });
+    return result;
+  };
+  // Serialize starts and stops; queued keep-alives recheck the persisted state.
+  driveControlQueue = driveControlQueue.then(run, run);
+  return driveControlQueue;
+}
+
+async function performDriveControl(action) {
   let timer;
   let controller;
   try {
@@ -578,7 +611,6 @@ async function controlDrive(action) {
     return { ok: false, message: error instanceof Error ? error.message : "Could not load drive control settings." };
   } finally {
     clearTimeout(timer);
-    driveControlBusy = false;
   }
 }
 

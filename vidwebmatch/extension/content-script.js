@@ -60,6 +60,14 @@ async function bootstrap() {
   latestSettings = await getSettings();
   installObserver();
   scheduleScan(false, true);
+  // Once per document, independently of helper availability and DOM rescans.
+  browser.runtime.sendMessage({ type: "vidwebmatch:pageLoaded" }).then((response) => {
+    if (response && response.ok === false) {
+      showBanner("Drive keep-alive failed: " + response.message);
+    }
+  }).catch((error) => {
+    showBanner("Drive keep-alive failed: " + (error instanceof Error ? error.message : String(error)));
+  });
 }
 
 async function getSettings() {

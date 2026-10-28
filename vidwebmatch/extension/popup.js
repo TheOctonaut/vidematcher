@@ -7,6 +7,7 @@ const openOptionsButton = document.getElementById("openOptionsButton");
 const mountDriveButton = document.getElementById("mountDriveButton");
 const unmountDriveButton = document.getElementById("unmountDriveButton");
 const driveStatusElement = document.getElementById("driveStatus");
+const keepAliveStatusElement = document.getElementById("keepAliveStatus");
 
 mountDriveButton.addEventListener("click", () => requestDriveControl("start"));
 unmountDriveButton.addEventListener("click", () => {
@@ -65,6 +66,22 @@ openOptionsButton.addEventListener("click", () => {
 });
 
 async function initialize() {
+  try {
+    const value = await browser.storage.local.get("driveKeepAlive");
+    const state = value.driveKeepAlive || {};
+    keepAliveStatusElement.textContent = state.enabled
+      ? "Drive keep-alive on: refreshed on watched page loads."
+      : "Drive keep-alive off: click Mount drive to enable.";
+    keepAliveStatusElement.classList.remove("ok", "fail");
+    if (state.lastError) {
+      keepAliveStatusElement.textContent += " Last drive request failed: " + state.lastError;
+      keepAliveStatusElement.classList.add("fail");
+    }
+  } catch (error) {
+    keepAliveStatusElement.textContent = "Could not read drive keep-alive state: " +
+      (error instanceof Error ? error.message : String(error));
+    keepAliveStatusElement.classList.add("fail");
+  }
   startHintElement.style.display = "none";
   try {
     const response = await browser.runtime.sendMessage({ type: "vidwebmatch:pingHelper" });
